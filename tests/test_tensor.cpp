@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <random>
 
 using inferno::Tensor;
 using inferno::matmul;
@@ -36,6 +37,30 @@ int main() {
     assert(r.shape()[0] == 1 && r.shape()[1] == 2);
     assert(close(r.at(0,0), 6.0f)); // 1*2 + 1*2 + 1*2
 
-    std::printf("all tensor tests passed\n");
+    // Every optimized variant must agree with the naive reference.
+    // This is the invariant that makes the benchmark meaningful: we are
+    // comparing four implementations of the SAME computation.
+    std::mt19937 gen(7);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    const size_t shapes[][3] = {{1,1,1}, {3,5,2}, {16,16,16},
+                                {64,64,64}, {65,33,17}, {128,96,64}};
+    for (auto& s : shapes) {
+        Tensor x({s[0], s[1]}), y({s[1], s[2]});
+        for (size_t i = 0; i < x.size(); ++i) x.data()[i] = dist(gen);
+        for (size_t i = 0; i < y.size(); ++i) y.data()[i] = dist(gen);
+        Tensor ref = matmul(x, y);
+        Tensor v1 = inferno::matmul_reordered(x, y);
+        Tensor v2 = inferno::matmul_blocked(x, y);
+        Tensor v3 = inferno::matmul_simd(x, y);
+        for (size_t i = 0; i < ref.size(); ++i) {
+            // Tolerance, not equality: the variants sum in a different
+            // order, and float addition is not associative.
+            assert(std::fabs(ref.data()[i] - v1.data()[i]) < 1e-3f);
+            assert(std::fabs(ref.data()[i] - v2.data()[i]) < 1e-3f);
+            assert(std::fabs(ref.data()[i] - v3.data()[i]) < 1e-3f);
+        }
+    }
+
+    std::printf("all tensor tests passed (naive + 3 optimized variants agree)\n");
     return 0;
 }

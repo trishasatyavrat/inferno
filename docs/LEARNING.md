@@ -105,3 +105,70 @@ our result against PyTorch's on 8 fixed + 200 random shapes.
 - "What Every Computer Scientist Should Know About Floating-Point
   Arithmetic" (Goldberg) — skim §1.5 on rounding; pairs with the
   RTOL experiment
+
+---
+
+## Day 3 (2026-09-02): Making it fast — and being wrong twice first
+
+**What we built:** three optimized matmul variants (`matmul_reordered`,
+`matmul_blocked`, `matmul_simd`), a benchmark harness reporting GFLOP/s
+(`make bench`), and tests asserting all four implementations agree.
+
+**Measured on this machine (Apple Silicon, -O2), N=512:**
+
+| variant | GFLOP/s | vs naive |
+|---|---|---|
+| naive (i-j-k) | 1.8 | 1.0x |
+| loop reordered (i-k-j) | 22.4 | 12.4x |
+| cache blocked (64x64 tiles) | 19.0 | 10.5x |
+| SIMD + register blocking | 24.5 | **13.6x** |
+
+**The concepts:**
+
+- **Why the reorder alone gives 12x.** The naive i-j-k loop walks *down*
+  a column of B. Memory comes in ~64-byte cache lines, so a column walk
+  fetches a whole line and uses 4 bytes of it, then evicts it. Swapping
+  to i-k-j walks *along* a row of B instead: every byte of every fetched
+  line gets used. Identical arithmetic, ~12x the throughput - the entire
+  difference is memory access pattern. This is EECS 112 cache material
+  paying off in one number.
+
+- **Blocking LOST to the plain reorder. That was not the plan.** Tiling
+  should help by keeping the working set cache-resident - but at N<=512
+  the matrices already mostly fit, so tiling added loop overhead and
+  interfered with the compiler's own optimization of the simple inner
+  loop, for no cache benefit it wasn't already getting. Kept in the repo
+  because the result is real: blocking pays off at sizes where the data
+  genuinely does not fit, and pretending otherwise would be dishonest.
+
+- **My first SIMD attempt was slower than doing nothing clever.**
+  Version one broadcast a_ik and did four FMAs per instruction - and
+  came in *below* the plain reordered loop. Diagnosis: the inner loop
+  loaded C from memory, did one FMA, and stored C back, every single
+  iteration. The bottleneck was never arithmetic, it was memory traffic,
+  so adding arithmetic throughput fixed nothing. The rewrite holds a
+  1x16 strip of C in four NEON registers across the *entire* k loop -
+  one load and one store per strip instead of per k - and that version
+  is the fastest of the four. Lesson worth keeping: profile the actual
+  bottleneck before optimizing the thing you assume is the bottleneck.
+
+- **Why `-O2` matters to the comparison.** The compiler auto-vectorizes
+  the simple reordered loop already, which is why beating it required
+  register blocking rather than just "using SIMD." Hand-written
+  intrinsics are not automatically faster than a compiler; they win only
+  when they express something the compiler cannot infer.
+
+**Do now:**
+1. `make bench` on your machine - numbers will differ, the ordering
+   should not.
+2. Change the block size in `matmul_blocked` (try 16, 32, 128) and
+   re-run. The curve has a peak; find roughly where.
+3. Read the two SIMD versions in git history (`git log -p src/tensor.cpp`)
+   and locate the load/store that made version one slow.
+
+**Resources:**
+- Drepper, "What Every Programmer Should Know About Memory" §6.2 (cache
+  optimization) - the blocking theory, including when it does not help
+- ARM NEON intrinsics reference: `vfmaq_f32`, `vld1q_f32`, `vdupq_n_f32`
+- Agner Fog's optimization manuals, ch. on memory access - the general
+  form of "memory traffic, not FLOPs, is usually the ceiling"

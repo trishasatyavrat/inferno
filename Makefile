@@ -8,7 +8,7 @@ build/test_tensor: $(SRC) $(TESTS) src/tensor.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(SRC) $(TESTS) -o $@
 
-.PHONY: test clean pymodule pytest
+.PHONY: test clean pymodule pytest bench
 
 test: build/test_tensor
 	./build/test_tensor
@@ -27,6 +27,13 @@ pymodule: $(SRC) src/bindings.cpp src/tensor.h
 # Run the Python-side correctness harness (needs `make pymodule` first).
 pytest: pymodule
 	$(PY) tests/test_vs_torch.py
+
+build/bench_matmul: $(SRC) bench/bench_matmul.cpp src/tensor.h
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(SRC) bench/bench_matmul.cpp -o $@
+
+bench: build/bench_matmul
+	./build/bench_matmul
 
 clean:
 	rm -rf build

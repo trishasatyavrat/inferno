@@ -12,30 +12,55 @@ understand exactly what runs when a language model generates a word.
 
 ## Status
 
-Early — day 1. Currently: tensor type + naive matmul with tests.
-Roadmap below tracks progress.
+Early. Matmul is implemented, verified against PyTorch, and optimized to
+~13.6x the naive baseline; transformer layers are next.
 
 - [x] Tensor type (float32, row-major) + naive matmul + tests
-- [ ] Python bindings (pybind11) + correctness harness vs PyTorch
+- [x] Python bindings (pybind11) + correctness harness vs PyTorch
+- [x] Optimization passes: loop order, cache blocking, SIMD
+      (each benchmarked and verified against the naive reference)
+- [ ] Multithreading across output rows
 - [ ] Transformer layers: embedding, layernorm, attention, MLP
 - [ ] Load real GPT-2 weights → first generated text
-- [ ] Optimization passes: loop order, cache blocking, SIMD, threads
-      (benchmarked individually)
-- [ ] Benchmark writeup vs PyTorch CPU
+- [ ] End-to-end benchmark vs PyTorch CPU
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)
+
+## Benchmarks
+
+Square matmul, Apple Silicon, `-O2`, N=512 (`make bench`):
+
+| variant | GFLOP/s | vs naive |
+|---|---|---|
+| naive triple loop (i-j-k) | 1.8 | 1.0x |
+| loop reordered (i-k-j) | 22.4 | 12.4x |
+| cache blocked (64x64 tiles) | 19.0 | 10.5x |
+| SIMD (NEON) + register blocking | 24.5 | **13.6x** |
+
+Two results worth stating plainly: cache blocking came in *below* the
+plain loop reorder at these sizes (the matrices largely fit in cache
+already, so tiling bought overhead rather than locality), and the first
+SIMD implementation was slower than no SIMD at all because its inner
+loop reloaded and stored C on every iteration - memory traffic, not
+arithmetic, was the ceiling. Holding a 1x16 strip of C in NEON registers
+across the whole k loop is what actually won. Details in
+[docs/LEARNING.md](docs/LEARNING.md).
 
 ## Build & test
 
 ```bash
-make test
+make test    # correctness: all four matmul variants must agree
+make bench   # performance: GFLOP/s per variant
+make pytest  # fuzzing harness against PyTorch (needs .venv)
 ```
 
-Requires a C++17 compiler (clang on macOS works out of the box).
+Requires a C++17 compiler (clang on macOS works out of the box). The
+Python harness needs a venv with torch, numpy and pybind11.
 
 ## Layout
 
-- `src/` — the engine (starts with `tensor.h/.cpp`)
-- `tests/` — plain-assert test programs, run by `make test`
+- `src/` — the engine (`tensor.h/.cpp`, `bindings.cpp`)
+- `tests/` — C++ assert tests + the Python/PyTorch fuzzing harness
+- `bench/` — benchmark harness reporting GFLOP/s per variant
 - `docs/LEARNING.md` — the running lab notebook: what each piece is,
   why it exists, what was measured
 
