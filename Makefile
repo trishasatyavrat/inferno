@@ -1,10 +1,10 @@
 CXX      := c++
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2
 
-SRC   := src/tensor.cpp
+SRC   := src/tensor.cpp src/ops.cpp
 TESTS := tests/test_tensor.cpp
 
-build/test_tensor: $(SRC) $(TESTS) src/tensor.h
+build/test_tensor: $(SRC) $(TESTS) src/tensor.h src/ops.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(SRC) $(TESTS) -o $@
 
@@ -17,7 +17,7 @@ test: build/test_tensor
 # -undefined dynamic_lookup is the macOS way to leave Python symbols
 # unresolved until import time.
 PY := .venv/bin/python
-pymodule: $(SRC) src/bindings.cpp src/tensor.h
+pymodule: $(SRC) src/bindings.cpp src/tensor.h src/ops.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -shared -fPIC -undefined dynamic_lookup \
 		$$($(PY) -m pybind11 --includes) \

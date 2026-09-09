@@ -12,15 +12,18 @@ understand exactly what runs when a language model generates a word.
 
 ## Status
 
-Early. Matmul is implemented, verified against PyTorch, and optimized to
-~13.6x the naive baseline; transformer layers are next.
+Early. Every operation GPT-2 needs - matmul, LayerNorm, softmax, GELU -
+is implemented and verified against PyTorch; matmul is optimized to
+~13.6x its naive baseline. Next: assembling them into attention blocks.
 
 - [x] Tensor type (float32, row-major) + naive matmul + tests
 - [x] Python bindings (pybind11) + correctness harness vs PyTorch
 - [x] Optimization passes: loop order, cache blocking, SIMD
       (each benchmarked and verified against the naive reference)
+- [x] Core ops: LayerNorm, softmax, GELU (verified vs PyTorch at real
+      GPT-2 dimensions, including the 50257-wide vocabulary)
 - [ ] Multithreading across output rows
-- [ ] Transformer layers: embedding, layernorm, attention, MLP
+- [ ] Attention block + MLP block assembled from the ops
 - [ ] Load real GPT-2 weights → first generated text
 - [ ] End-to-end benchmark vs PyTorch CPU
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)

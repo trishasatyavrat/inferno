@@ -7,6 +7,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include "tensor.h"
+#include "ops.h"
 
 namespace py = pybind11;
 using inferno::Tensor;
@@ -36,7 +37,29 @@ static py::array_t<float> py_matmul(py::array_t<float, py::array::c_style | py::
     return to_numpy(inferno::matmul(from_numpy(a), from_numpy(b)));
 }
 
+static py::array_t<float> py_layernorm(py::array_t<float, py::array::c_style | py::array::forcecast> x,
+                                       py::array_t<float, py::array::c_style | py::array::forcecast> gamma,
+                                       py::array_t<float, py::array::c_style | py::array::forcecast> beta,
+                                       float eps) {
+    // gamma/beta arrive 1D; wrap them as (1, C) so from_numpy accepts them.
+    auto g = gamma.reshape({static_cast<py::ssize_t>(1), gamma.size()});
+    auto b = beta.reshape({static_cast<py::ssize_t>(1), beta.size()});
+    return to_numpy(inferno::layernorm(from_numpy(x), from_numpy(g), from_numpy(b), eps));
+}
+
+static py::array_t<float> py_softmax(py::array_t<float, py::array::c_style | py::array::forcecast> x) {
+    return to_numpy(inferno::softmax(from_numpy(x)));
+}
+
+static py::array_t<float> py_gelu(py::array_t<float, py::array::c_style | py::array::forcecast> x) {
+    return to_numpy(inferno::gelu(from_numpy(x)));
+}
+
 PYBIND11_MODULE(inferno_core, m) {
     m.doc() = "inferno: hand-built tensor ops, exposed to Python";
     m.def("matmul", &py_matmul, "C = A @ B, computed by inferno's C++ engine");
+    m.def("layernorm", &py_layernorm, "row-wise LayerNorm",
+          py::arg("x"), py::arg("gamma"), py::arg("beta"), py::arg("eps") = 1e-5f);
+    m.def("softmax", &py_softmax, "row-wise softmax");
+    m.def("gelu", &py_gelu, "GELU (tanh approximation, as in GPT-2)");
 }

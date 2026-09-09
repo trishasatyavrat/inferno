@@ -172,3 +172,71 @@ our result against PyTorch's on 8 fixed + 200 random shapes.
 - ARM NEON intrinsics reference: `vfmaq_f32`, `vld1q_f32`, `vdupq_n_f32`
 - Agner Fog's optimization manuals, ch. on memory access - the general
   form of "memory traffic, not FLOPs, is usually the ceiling"
+
+---
+
+## Day 4 (2026-09-09): The transformer's other three operations
+
+**What we built:** `src/ops.h` / `src/ops.cpp` - LayerNorm, softmax,
+and GELU - exposed to Python and verified against PyTorch. With matmul,
+these are *every* operation GPT-2 performs. Nothing else is needed to
+run the model; the rest is wiring.
+
+**The concepts:**
+
+- **Why a separate ops.cpp.** `tensor.h` owns the container and matmul,
+  which change for *performance* reasons. These layers change when the
+  *architecture* does. Different reasons to change means different
+  files - that is the whole content of "separation of concerns," and
+  it is a design question interviewers ask about.
+
+- **LayerNorm, in words.** For each token's feature vector: subtract
+  the mean, divide by the standard deviation, then scale and shift by
+  learned parameters gamma and beta. It keeps activations in a sane
+  range as they flow through 12 stacked blocks. Note it normalizes each
+  *row* independently - one token at a time, never across the batch.
+
+- **Softmax's max subtraction is not optional.** Softmax is
+  exp(x)/sum(exp(x)), but exp(1000) overflows float32 to infinity and
+  the result becomes NaN. Subtracting the row maximum first is
+  algebraically a no-op (the factor cancels top and bottom) and
+  numerically the difference between working and not. There is a test
+  in the harness that feeds it logits of 1000 specifically to prove
+  the guard works.
+
+- **GELU: matching the approximation matters.** GPT-2 was trained with
+  the *tanh approximation* of GELU, not the exact erf version. Torch's
+  default `gelu` is the erf one, so comparing against it made our
+  correct code look wrong until the test asked for
+  `approximate="tanh"`. Reproducing a model means reproducing its
+  arithmetic exactly, approximations included.
+
+- **The bug worth remembering: float32 accumulators drift.** The first
+  layernorm passed every shape except 64x50257 - GPT-2's vocabulary
+  width - where it diverged from PyTorch by 6.8e-05. Cause: summing
+  50,257 float32 values loses low-order bits on every single addition,
+  and the error compounds. Fix: accumulate the mean and variance in
+  `double` while keeping the data in float32. General rule: **a
+  reduction over many elements needs an accumulator wider than the
+  elements.** This is exactly why the harness tests real GPT-2
+  dimensions instead of only small toy shapes - the bug is invisible
+  at 16 columns.
+
+- **Variance formula choice.** We compute the mean of squared
+  deviations, not `E[x^2] - E[x]^2`. The second is one pass and looks
+  cleverer, but it subtracts two large nearly-equal numbers, which
+  catastrophically cancels. Two passes, correct answer.
+
+**Do now:**
+1. `make pytest` - all four ops verified.
+2. Revert the double accumulators in `layernorm` to float and rerun.
+   Watch only the 50257-wide case fail. That is the bug, reproduced.
+3. In `check_gelu`, drop `approximate="tanh"` and see how far the erf
+   version differs. That gap is why the detail matters.
+
+**Resources:**
+- The GPT-2 paper + Karpathy's nanoGPT `model.py` - compare our ops to
+  the reference implementation line by line
+- "Why does softmax subtract the max?" - any numerical-stability write-up
+- Kahan summation (Wikipedia) - the more sophisticated answer to the
+  accumulator problem we solved with `double`
