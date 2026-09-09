@@ -1,11 +1,11 @@
 # inferno
 
-A GPT-2 inference engine built from scratch in C++ — no PyTorch, no ML
-libraries. Loads real GPT-2 weights and generates text using tensor
-math implemented by hand, then makes it fast: cache blocking, SIMD,
+A GPT-2 inference engine built C++ (no PyTorch, no ML
+libraries.) Loads GPT-2 weights and generates text using tensor
+math implemented, then makes it fast: cache blocking, SIMD,
 multithreading, with honest benchmarks against PyTorch at every step.
 
-**Why:** every AI framework hides the same core — a few tensor
+**Why:** every AI framework hides the same core, a few tensor
 operations, mostly matrix multiplication, executed as fast as the
 hardware allows. This project builds that core in the open, to
 understand exactly what runs when a language model generates a word.
@@ -20,7 +20,7 @@ is implemented and verified against PyTorch; matmul is optimized to
 - [x] Python bindings (pybind11) + correctness harness vs PyTorch
 - [x] Optimization passes: loop order, cache blocking, SIMD
       (each benchmarked and verified against the naive reference)
-- [x] Core ops: LayerNorm, softmax, GELU (verified vs PyTorch at real
+- [x] Core ops: LayerNorm, softmax, GELU (verified vs PyTorch at
       GPT-2 dimensions, including the 50257-wide vocabulary)
 - [ ] Multithreading across output rows
 - [ ] Attention block + MLP block assembled from the ops
