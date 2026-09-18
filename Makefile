@@ -1,8 +1,8 @@
 CXX      := c++
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2
 
-SRC   := src/tensor.cpp src/ops.cpp src/model.cpp src/checkpoint.cpp src/generate.cpp
-HDRS  := src/tensor.h src/ops.h src/model.h src/checkpoint.h src/generate.h
+SRC   := src/tensor.cpp src/ops.cpp src/model.cpp src/checkpoint.cpp src/generate.cpp src/tokenizer.cpp
+HDRS  := src/tensor.h src/ops.h src/model.h src/checkpoint.h src/generate.h src/tokenizer.h
 TESTS := tests/test_tensor.cpp
 
 build/test_tensor: $(SRC) $(TESTS) $(HDRS)
@@ -28,6 +28,7 @@ pymodule: $(SRC) src/bindings.cpp $(HDRS)
 # Run the Python-side correctness harness (needs `make pymodule` first).
 pytest: pymodule
 	$(PY) tests/test_vs_torch.py
+	$(PY) tests/test_tokenizer.py
 
 build/bench_matmul: $(SRC) bench/bench_matmul.cpp $(HDRS)
 	@mkdir -p build
@@ -44,7 +45,8 @@ build/inferno: $(SRC) src/main.cpp $(HDRS)
 inferno: build/inferno
 
 # Download + convert the released GPT-2 small weights (~548 MB) into
-# weights/gpt2.bin. One-time; needs huggingface_hub + safetensors in .venv.
+# weights/gpt2.bin and its tokenizer into weights/tokenizer.bin.
+# One-time; needs huggingface_hub + safetensors in .venv.
 weights:
 	$(PY) tools/export_gpt2.py
 

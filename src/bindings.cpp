@@ -11,6 +11,7 @@
 #include "model.h"
 #include "checkpoint.h"
 #include "generate.h"
+#include "tokenizer.h"
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
@@ -168,6 +169,16 @@ PYBIND11_MODULE(inferno_core, m) {
         .def("generate", &PyGPT2::generate, "prompt ids -> prompt + generated ids",
              py::arg("prompt"), py::arg("max_new") = 20, py::arg("temperature") = 0.8f,
              py::arg("top_k") = 40, py::arg("seed") = 1);
+    py::class_<inferno::Tokenizer>(m, "Tokenizer")
+        .def(py::init<const std::string&>(), py::arg("path"))
+        .def("encode", &inferno::Tokenizer::encode, py::arg("text"))
+        .def("decode", [](const inferno::Tokenizer& t, const std::vector<int>& ids) {
+            // Raw bytes out; Python decodes UTF-8 (a token can split a
+            // multi-byte character, so partial output may be invalid).
+            return py::bytes(t.decode(ids));
+        }, py::arg("ids"))
+        .def("vocab_size", &inferno::Tokenizer::vocab_size)
+        .def_static("pretokenize", &inferno::Tokenizer::pretokenize, py::arg("text"));
     m.def("sample_next", &py_sample_next, "draw one token id from a logits row",
           py::arg("logits"), py::arg("temperature") = 1.0f, py::arg("top_k") = 0,
           py::arg("seed") = 1);

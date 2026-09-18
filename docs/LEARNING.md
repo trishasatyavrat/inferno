@@ -637,3 +637,81 @@ window is a hard stop.
   nucleus-sampling paper; §3 explains why pure sampling goes wrong
 - Marsaglia, "Xorshift RNGs" (2003) - four pages, the whole generator
 - Karpathy's `llm.c` sampler (`sample_softmax`) - same design, in C
+
+---
+
+## Day 10 (2026-09-18): The tokenizer - text in, text out
+
+**What we built:** `src/tokenizer.h/.cpp` - GPT-2's byte-level BPE
+tokenizer in C++, reading a compact "INFT" file that `make weights` now
+also produces from the released `vocab.json` + `merges.txt`. The CLI
+takes `--prompt "text"` and streams decoded text; Python gets
+`Tokenizer(path).encode/decode`. Tests: 13 pre-tokenizer cases against
+the regex's behavior, a toy vocabulary whose merges are worked by hand,
+an exact round-trip property over UTF-8 and emoji, and a cross-check
+against `tiktoken` that runs automatically once the real files exist.
+
+**The concepts:**
+
+- **Three stages, each simple.** (1) Pre-tokenize: split text into
+  chunks - a word with its leading space, a number, a run of
+  punctuation, a whitespace run. (2) BPE each chunk: start from one
+  token per *byte*, then repeatedly merge the adjacent pair with the
+  lowest rank in the learned merge list until nothing merges. (3)
+  Concatenate the ids. Decoding is just concatenating each id's bytes.
+  Merges never cross chunk boundaries, which is why "hel lo" cannot
+  become "hello" - the test checks that.
+
+- **"Byte-level" is why there is no unknown token.** The base
+  vocabulary is all 256 byte values, so *any* input - Chinese,
+  emoji, binary junk - tokenizes and round-trips exactly. The cost is
+  that unusual text takes many tokens. GPT-2's `vocab.json` shows bytes
+  as printable characters (space is `Ġ`) because JSON is text; the
+  exporter undoes that mapping so the C++ sees real bytes.
+
+- **What a merge rule really is.** `merges.txt` line 0 is `Ġ t`: the
+  most frequent adjacent pair in the training corpus. Rank = order
+  learned = priority at encode time. Stored in our file as (id_a, id_b)
+  because the merged token's bytes are just a+b, and the loader
+  verifies that a+b exists in the vocabulary - a corrupt file fails at
+  load, not mid-generation.
+
+- **The regex, by hand.** GPT-2's pre-tokenizer is one regex with
+  Unicode classes (`\p{L}`), which `std::regex` cannot do. So it is
+  hand-written: contractions first (`'s`, `'re`... lowercase only - a
+  real quirk, "I'M" tokenizes differently from "I'm"), then
+  optional-space + letters / digits / punctuation, then whitespace with
+  the `\s+(?!\S)` rule: in "two  spaces", the first space is its own
+  chunk and the second attaches to "spaces". The approximation: every
+  non-ASCII byte counts as a letter. Correct for accented words and
+  CJK; wrong for non-ASCII *punctuation* like curly quotes, which the
+  regex would split off. The tiktoken cross-check will show exactly
+  where, once the real vocab is present.
+
+- **Decoding can split a character.** A token's bytes may be *part* of
+  a multi-byte UTF-8 character; decoding one token at a time can emit
+  an invalid prefix. That is why `decode` returns raw bytes and Python
+  does the UTF-8 decoding, and why the CLI's streamed output looked
+  like `��` on random weights - not a bug, a property of byte-level
+  tokenization that real UIs handle by buffering.
+
+- **The test that cannot run yet is still in the file.** The tiktoken
+  comparison skips with a message when `weights/tokenizer.bin` is
+  absent, rather than being left out. When the download happens, the
+  verification is already waiting. Write the test before the data.
+
+**Do now:**
+1. `make pytest` - both tokenizer stages pass.
+2. On paper, BPE "hello" with the toy merges from `test_tokenizer.py`
+   and check your sequence of intermediate states against the comment.
+3. After `make weights`: `uv pip install tiktoken`, rerun `make pytest`
+   and read the cross-check line. Then
+   `./build/inferno weights/gpt2.bin --prompt "The capital of France is" --temp 0`.
+
+**Resources:**
+- Karpathy, "Let's build the GPT Tokenizer" (video) - byte-level BPE
+  from scratch, the same algorithm as ours
+- Sennrich et al. 2016, "Neural Machine Translation of Rare Words with
+  Subword Units" - the original BPE-for-NLP paper, §3.2
+- OpenAI's original `encoder.py` (gpt-2 repo) - 100 lines; ours is a
+  translation of it
