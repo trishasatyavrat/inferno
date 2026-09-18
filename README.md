@@ -14,9 +14,10 @@ understand exactly what runs when a language model generates a word.
 
 The full GPT-2 forward pass runs and matches a PyTorch reference at the
 real 124M-parameter shape, and the released checkpoint can be exported
-into inferno's own weight format and loaded by the C++ binary. matmul is
-optimized to ~70x its naive baseline (SIMD + threads). Next: the
-generation loop and a tokenizer.
+into inferno's own weight format and loaded by the C++ binary, which generates token ids from a prompt
+(greedy / temperature / top-k, reproducible by seed). matmul is
+optimized to ~70x its naive baseline (SIMD + threads). Next: a
+tokenizer, so ids become text, then a KV cache.
 
 - [x] Tensor type (float32, row-major) + naive matmul + tests
 - [x] Python bindings (pybind11) + correctness harness vs PyTorch
@@ -28,7 +29,9 @@ generation loop and a tokenizer.
 - [x] Causal multi-head attention (fused QKV, 12 heads, verified vs PyTorch)
 - [x] MLP block, transformer block, full GPT-2 forward pass (verified vs PyTorch at 124M config)
 - [x] Weight file format + loader + exporter from the released checkpoint
-- [ ] Generation loop + tokenizer → first generated text
+- [x] Generation loop: greedy, temperature, top-k sampling, streaming, seeded
+- [ ] BPE tokenizer → first generated *text*
+- [ ] KV cache (measured against the full-recompute baseline)
 - [ ] End-to-end benchmark vs PyTorch CPU
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)
 
@@ -62,7 +65,7 @@ make test     # correctness: all matmul variants must agree
 make bench    # performance: GFLOP/s per variant
 make pytest   # harness against PyTorch: every op + the full model (needs .venv)
 make weights  # one-time: download GPT-2 small (548 MB) -> weights/gpt2.bin
-make inferno  # the CLI: ./build/inferno weights/gpt2.bin <token ids...>
+make inferno  # the CLI: ./build/inferno weights/gpt2.bin --n 20 <token ids...>
 ```
 
 Requires a C++17 compiler (clang on macOS works out of the box). The

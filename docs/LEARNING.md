@@ -559,3 +559,81 @@ tested without it.
 - GGUF spec (llama.cpp) - the same idea, production-grade
 - Hugging Face `modeling_gpt2.py`, the `Conv1D` class docstring - why
   the weights are (in, out)
+
+---
+
+## Day 9 (2026-09-18): Generation - and a seed bug the test found
+
+**What we built:** `src/generate.h/.cpp` - `sample_next()` (greedy,
+temperature, top-k) and `generate()` (the autoregressive loop, with a
+streaming callback). The CLI now generates: `./build/inferno w.bin --n 20
+--temp 0.8 --top-k 40 --seed 1 <ids>`, printing each token as it lands.
+Python: `GPT2.generate(prompt, max_new, temperature, top_k, seed)` and
+`sample_next(logits, ...)`. Five properties are tested on the toy model:
+greedy equals an argmax loop written in Python, same seed reproduces,
+`top_k=1` equals greedy, top-k never draws outside the top k, cold
+temperature collapses to the argmax while hot spreads, and the context
+window is a hard stop.
+
+**The concepts:**
+
+- **Generation is a loop around forward.** Run the model on the prompt,
+  take the *last* row of logits (the prediction for what comes next),
+  pick a token, append it, run again. That is all. Everything the model
+  "says" comes out one token at a time from this loop, which is why
+  chat UIs stream.
+
+- **This version wastes almost all its work.** Every step recomputes
+  logits for *every* position and throws away all but the last row.
+  Generating T tokens costs 1 + 2 + ... + T = O(T^2) forward rows. The
+  CLI prints "full recompute each step" on purpose - it is the baseline
+  the KV cache will be measured against, and the tok/s number is the
+  before picture.
+
+- **Temperature, in one line.** Divide the logits by T before softmax.
+  T -> 0 makes the largest logit dominate (greedy); T = 1 is the model's
+  own distribution; T > 1 flattens it toward uniform. The test checks
+  the two ends: T=0.05 over 200 seeds produced at most 2 distinct
+  tokens, T=3 produced at least 10.
+
+- **Top-k is the coherence knob.** A 50257-way softmax always puts a
+  little mass on nonsense; sampled often enough, nonsense appears. Keep
+  only the k highest logits (`partial_sort`, O(V log k)) and the tail is
+  gone. k=1 is greedy; k=0 means "no cut". Top-p (nucleus) is the
+  smarter cousin and is a ten-line addition if wanted.
+
+- **The seed bug.** The RNG is xorshift32, chosen because it is four
+  lines and bit-identical on every platform (std::mt19937 is portable,
+  but `std::uniform_real_distribution` on top of it is *not*). The first
+  version seeded it directly with the user's number - and the test
+  "400 draws at top-k=5 should hit several tokens" failed: every draw
+  picked the top token. Reason: xorshift's first output from seed 1 is
+  270369, out of 4.29 billion, so u = 0.00006 on every seed from 1 to
+  400. Small seeds have small bits, and one xorshift round does not
+  spread them. Fix: hash the seed through murmur3's finalizer first
+  (`seed_rng`). Two lessons: PRNGs need warm-up or seed mixing, and a
+  property test ("draws should vary") catches what reading the code
+  did not.
+
+- **Reproducibility is a feature, not a test convenience.** Same seed,
+  same prompt, same weights - same text, on any machine. That is what
+  makes a generation bug reportable. It is why the RNG is hand-rolled
+  rather than borrowed from the standard library's non-portable
+  distributions.
+
+**Do now:**
+1. `make inferno`, write a toy checkpoint (see Day 8), and run with
+   `--temp 0` twice, then `--seed 1` and `--seed 2`.
+2. Revert `seed_rng` to `return seed;` and run `make pytest` - watch the
+   top-k test fail. Then print the first `u` for seeds 1, 2, 3 and see
+   why.
+3. Compute by hand the O(T^2) cost: for a 20-token prompt and 100
+   generated tokens, how many token-rows does this loop push through
+   the model in total? (Answer: sum of 20..119.) The KV cache makes it
+   119.
+
+**Resources:**
+- Holtzman et al., "The Curious Case of Neural Text Degeneration" - the
+  nucleus-sampling paper; §3 explains why pure sampling goes wrong
+- Marsaglia, "Xorshift RNGs" (2003) - four pages, the whole generator
+- Karpathy's `llm.c` sampler (`sample_softmax`) - same design, in C

@@ -188,6 +188,55 @@ def check_gpt2(cfg, p, tokens, rtol=2e-3, atol=2e-3):
     if not np.array_equal(ours.argmax(-1), theirs.argmax(-1)):
         raise AssertionError("gpt2 argmax disagrees")
 
+def check_sampling(cfg, p, rng):
+    model = inferno_core.GPT2(cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_head"],
+                              cfg["n_layer"], p)
+    prompt = [7, 3, 9]
+
+    # Greedy generation must equal "run forward, take argmax, append" -
+    # the definition, spelled out in Python, against the C++ loop.
+    greedy = model.generate(prompt, max_new=6, temperature=0.0)
+    manual = list(prompt)
+    for _ in range(6):
+        manual.append(int(model.forward(manual)[-1].argmax()))
+    if greedy != manual:
+        raise AssertionError(f"greedy generate {greedy} != argmax loop {manual}")
+
+    # Same seed, same output; different seed, (almost surely) different.
+    a = model.generate(prompt, max_new=8, temperature=1.0, top_k=0, seed=5)
+    b = model.generate(prompt, max_new=8, temperature=1.0, top_k=0, seed=5)
+    c = model.generate(prompt, max_new=8, temperature=1.0, top_k=0, seed=6)
+    if a != b:
+        raise AssertionError("same seed produced different output")
+    if a == c:
+        raise AssertionError("different seeds produced identical 8-token output (suspicious)")
+    if len(a) != len(prompt) + 8 or not all(0 <= t < cfg["n_vocab"] for t in a):
+        raise AssertionError("generated ids out of range or wrong length")
+
+    # top_k=1 is greedy by another name.
+    if model.generate(prompt, max_new=6, temperature=1.0, top_k=1, seed=3) != greedy:
+        raise AssertionError("top_k=1 should equal greedy")
+
+    # Sampling respects top-k: over many draws from one logits row, every
+    # chosen id is in the k highest. And temperature: a very cold draw is
+    # nearly always the argmax; a hot one spreads out.
+    logits = rng.standard_normal(cfg["n_vocab"], dtype=np.float32) * 2
+    top5 = set(np.argsort(-logits)[:5].tolist())
+    draws = [inferno_core.sample_next(logits, temperature=1.0, top_k=5, seed=s) for s in range(1, 400)]
+    if not set(draws) <= top5:
+        raise AssertionError("top-k sampling drew a token outside the top k")
+    if len(set(draws)) < 3:
+        raise AssertionError("top-k=5 at T=1 should hit several of the five over 400 draws")
+    cold = [inferno_core.sample_next(logits, temperature=0.05, top_k=0, seed=s) for s in range(1, 200)]
+    hot = [inferno_core.sample_next(logits, temperature=3.0, top_k=0, seed=s) for s in range(1, 200)]
+    if len(set(cold)) > 2 or len(set(hot)) < 10:
+        raise AssertionError(f"temperature not behaving: cold={len(set(cold))} distinct, hot={len(set(hot))}")
+
+    # The context window is a hard stop: never more than n_ctx tokens.
+    long_out = model.generate(prompt, max_new=100, temperature=0.0)
+    if len(long_out) != cfg["n_ctx"]:
+        raise AssertionError(f"generate exceeded/undershot n_ctx: {len(long_out)} vs {cfg['n_ctx']}")
+
 def main():
     rng = np.random.default_rng(0)  # fixed seed: failures must be reproducible
     shapes = [(1, 1, 1), (2, 2, 2), (1, 7, 3), (5, 1, 5),
@@ -263,6 +312,10 @@ def main():
         if loaded.n_params() != expected:
             raise AssertionError(f"n_params {loaded.n_params()} != {expected}")
     print("checkpoint round-trip: loader reproduces dict-built model bit-for-bit")
+
+    check_sampling(small, p_small, rng)
+    print("generation: greedy == argmax loop, seeds reproduce, top-k respected, "
+          "temperature sharpens, n_ctx honored")
 
 if __name__ == "__main__":
     main()

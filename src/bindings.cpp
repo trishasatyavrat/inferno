@@ -10,6 +10,7 @@
 #include "ops.h"
 #include "model.h"
 #include "checkpoint.h"
+#include "generate.h"
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
@@ -122,7 +123,26 @@ struct PyGPT2 {
     py::array_t<float> forward(const std::vector<int>& tokens) {
         return to_numpy(inferno::gpt2_forward(w, tokens));
     }
+
+    std::vector<int> generate(const std::vector<int>& prompt, size_t max_new,
+                              float temperature, size_t top_k, uint32_t seed) {
+        inferno::SampleOptions opt;
+        opt.temperature = temperature;
+        opt.top_k = top_k;
+        opt.seed = seed;
+        return inferno::generate(w, prompt, max_new, opt);
+    }
 };
+
+static int py_sample_next(Arr logits, float temperature, size_t top_k, uint32_t seed) {
+    auto buf = logits.request();
+    inferno::SampleOptions opt;
+    opt.temperature = temperature;
+    opt.top_k = top_k;
+    uint32_t state = inferno::seed_rng(seed);
+    return inferno::sample_next(static_cast<const float*>(buf.ptr),
+                                static_cast<size_t>(buf.size), opt, state);
+}
 
 PYBIND11_MODULE(inferno_core, m) {
     m.doc() = "inferno: hand-built tensor ops, exposed to Python";
@@ -144,5 +164,11 @@ PYBIND11_MODULE(inferno_core, m) {
         .def(py::init<const std::string&>(), py::arg("path"),
              "load an INFR checkpoint written by tools/export_gpt2.py")
         .def("n_params", &PyGPT2::n_params)
-        .def("forward", &PyGPT2::forward, "token ids -> logits (T, n_vocab)");
+        .def("forward", &PyGPT2::forward, "token ids -> logits (T, n_vocab)")
+        .def("generate", &PyGPT2::generate, "prompt ids -> prompt + generated ids",
+             py::arg("prompt"), py::arg("max_new") = 20, py::arg("temperature") = 0.8f,
+             py::arg("top_k") = 40, py::arg("seed") = 1);
+    m.def("sample_next", &py_sample_next, "draw one token id from a logits row",
+          py::arg("logits"), py::arg("temperature") = 1.0f, py::arg("top_k") = 0,
+          py::arg("seed") = 1);
 }

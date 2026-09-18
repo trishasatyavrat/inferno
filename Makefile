@@ -1,8 +1,8 @@
 CXX      := c++
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2
 
-SRC   := src/tensor.cpp src/ops.cpp src/model.cpp src/checkpoint.cpp
-HDRS  := src/tensor.h src/ops.h src/model.h src/checkpoint.h
+SRC   := src/tensor.cpp src/ops.cpp src/model.cpp src/checkpoint.cpp src/generate.cpp
+HDRS  := src/tensor.h src/ops.h src/model.h src/checkpoint.h src/generate.h
 TESTS := tests/test_tensor.cpp
 
 build/test_tensor: $(SRC) $(TESTS) $(HDRS)
