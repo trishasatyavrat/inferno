@@ -14,7 +14,8 @@ understand exactly what runs when a language model generates a word.
 
 Early. Every operation GPT-2 needs - matmul, LayerNorm, softmax, GELU -
 is implemented and verified against PyTorch; matmul is optimized to
-~13.6x its naive baseline. Next: assembling them into attention blocks.
+~70x its naive baseline (SIMD + threads). Next: assembling the ops into
+attention blocks.
 
 - [x] Tensor type (float32, row-major) + naive matmul + tests
 - [x] Python bindings (pybind11) + correctness harness vs PyTorch
@@ -22,7 +23,7 @@ is implemented and verified against PyTorch; matmul is optimized to
       (each benchmarked and verified against the naive reference)
 - [x] Core ops: LayerNorm, softmax, GELU (verified vs PyTorch at
       GPT-2 dimensions, including the 50257-wide vocabulary)
-- [ ] Multithreading across output rows
+- [x] Multithreading across output rows (rows of C split across cores)
 - [ ] Attention block + MLP block assembled from the ops
 - [ ] Load real GPT-2 weights → first generated text
 - [ ] End-to-end benchmark vs PyTorch CPU
@@ -37,7 +38,8 @@ Square matmul, Apple Silicon, `-O2`, N=512 (`make bench`):
 | naive triple loop (i-j-k) | 1.8 | 1.0x |
 | loop reordered (i-k-j) | 22.4 | 12.4x |
 | cache blocked (64x64 tiles) | 19.0 | 10.5x |
-| SIMD (NEON) + register blocking | 24.5 | **13.6x** |
+| SIMD (NEON) + register blocking | 24.5 | 13.6x |
+| SIMD + 11 threads (rows split) | 136.4 | **~70x** |
 
 Two results worth stating plainly: cache blocking came in *below* the
 plain loop reorder at these sizes (the matrices largely fit in cache
@@ -45,8 +47,10 @@ already, so tiling bought overhead rather than locality), and the first
 SIMD implementation was slower than no SIMD at all because its inner
 loop reloaded and stored C on every iteration - memory traffic, not
 arithmetic, was the ceiling. Holding a 1x16 strip of C in NEON registers
-across the whole k loop is what actually won. Details in
-[docs/LEARNING.md](docs/LEARNING.md).
+across the whole k loop is what actually won. Threading is a clean 4.6x
+at N=512 but *loses* at N=64 (thread spawn costs more than the work)
+and sags at N=1024 (11 threads contending for bandwidth on the same 4 MB
+of B). Details in [docs/LEARNING.md](docs/LEARNING.md).
 
 ## Build & test
 

@@ -43,7 +43,8 @@ int main() {
     std::mt19937 gen(7);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     const size_t shapes[][3] = {{1,1,1}, {3,5,2}, {16,16,16},
-                                {64,64,64}, {65,33,17}, {128,96,64}};
+                                {64,64,64}, {65,33,17}, {128,96,64},
+                                {200,64,32}, {1,768,768}};
     for (auto& s : shapes) {
         Tensor x({s[0], s[1]}), y({s[1], s[2]});
         for (size_t i = 0; i < x.size(); ++i) x.data()[i] = dist(gen);
@@ -52,15 +53,19 @@ int main() {
         Tensor v1 = inferno::matmul_reordered(x, y);
         Tensor v2 = inferno::matmul_blocked(x, y);
         Tensor v3 = inferno::matmul_simd(x, y);
+        Tensor v4 = inferno::matmul_threaded(x, y);      // one thread per core
+        Tensor v5 = inferno::matmul_threaded(x, y, 3);   // odd count: uneven row split
         for (size_t i = 0; i < ref.size(); ++i) {
             // Tolerance, not equality: the variants sum in a different
             // order, and float addition is not associative.
             assert(std::fabs(ref.data()[i] - v1.data()[i]) < 1e-3f);
             assert(std::fabs(ref.data()[i] - v2.data()[i]) < 1e-3f);
             assert(std::fabs(ref.data()[i] - v3.data()[i]) < 1e-3f);
+            assert(std::fabs(ref.data()[i] - v4.data()[i]) < 1e-3f);
+            assert(std::fabs(ref.data()[i] - v5.data()[i]) < 1e-3f);
         }
     }
 
-    std::printf("all tensor tests passed (naive + 3 optimized variants agree)\n");
+    std::printf("all tensor tests passed (naive + 4 optimized variants agree)\n");
     return 0;
 }

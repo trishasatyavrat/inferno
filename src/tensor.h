@@ -54,4 +54,10 @@ Tensor matmul_blocked(const Tensor& a, const Tensor& b, size_t block = 64);
 //    Apple Silicon), computing 4 columns of C per instruction.
 Tensor matmul_simd(const Tensor& a, const Tensor& b);
 
+// 4. Multithreading. The SIMD kernel, with the rows of C split across
+//    threads. Rows are independent (row i of C depends only on row i of
+//    A and all of B), so there is no shared write and no locking:
+//    embarrassingly parallel. n_threads = 0 means "one per core".
+Tensor matmul_threaded(const Tensor& a, const Tensor& b, size_t n_threads = 0);
+
 } // namespace inferno

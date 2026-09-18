@@ -6,6 +6,7 @@
 #include <arm_neon.h>
 #endif
 #include <stdexcept>
+#include <thread>
 
 namespace inferno {
 
@@ -126,21 +127,18 @@ Tensor matmul_blocked(const Tensor& a, const Tensor& b, size_t block) {
     return c;
 }
 
-Tensor matmul_simd(const Tensor& a, const Tensor& b) {
-    check_shapes(a, b);
-    const size_t M = a.shape()[0], K = a.shape()[1], N = b.shape()[1];
-    Tensor c({M, N});
-    const float* A = a.data();
-    const float* B = b.data();
-    float* C = c.data();
-
+// The SIMD kernel over a row range [i0, i1) of C. Pulled out of
+// matmul_simd so the threaded version can hand each thread its own
+// slice of rows and reuse the exact same inner loop.
+static void simd_rows(const float* A, const float* B, float* C,
+                      size_t K, size_t N, size_t i0, size_t i1) {
 #if defined(__ARM_NEON)
     // Register blocking: hold a 1x16 strip of C in four NEON registers
     // across the ENTIRE k loop, so C is loaded and stored once per strip
     // instead of once per k. The first version of this function did the
     // load/store every iteration and lost to the plain reordered loop -
     // memory traffic, not arithmetic, was the bottleneck.
-    for (size_t i = 0; i < M; ++i) {
+    for (size_t i = i0; i < i1; ++i) {
         const float* a_row = A + i * K;
         float* c_row = C + i * N;
         size_t j = 0;
@@ -171,8 +169,59 @@ Tensor matmul_simd(const Tensor& a, const Tensor& b) {
         }
     }
 #else
-    return matmul_blocked(a, b);
+    // Portable fallback: the reordered loop over the same row range.
+    for (size_t i = i0; i < i1; ++i) {
+        float* c_row = C + i * N;
+        for (size_t k = 0; k < K; ++k) {
+            const float a_ik = A[i * K + k];
+            const float* b_row = B + k * N;
+            for (size_t j = 0; j < N; ++j) c_row[j] += a_ik * b_row[j];
+        }
+    }
 #endif
+}
+
+Tensor matmul_simd(const Tensor& a, const Tensor& b) {
+    check_shapes(a, b);
+    const size_t M = a.shape()[0], K = a.shape()[1], N = b.shape()[1];
+    Tensor c({M, N});
+    simd_rows(a.data(), b.data(), c.data(), K, N, 0, M);
+    return c;
+}
+
+Tensor matmul_threaded(const Tensor& a, const Tensor& b, size_t n_threads) {
+    check_shapes(a, b);
+    const size_t M = a.shape()[0], K = a.shape()[1], N = b.shape()[1];
+    Tensor c({M, N});
+
+    if (n_threads == 0) n_threads = std::thread::hardware_concurrency();
+    if (n_threads == 0) n_threads = 1;
+    // Spawning a thread costs tens of microseconds. For small matrices
+    // that overhead exceeds the work, so give each thread a meaningful
+    // chunk: at least 16 rows, and never more threads than rows.
+    const size_t min_rows_per_thread = 16;
+    n_threads = std::min(n_threads, std::max<size_t>(1, M / min_rows_per_thread));
+    if (n_threads <= 1) {
+        simd_rows(a.data(), b.data(), c.data(), K, N, 0, M);
+        return c;
+    }
+
+    const float* A = a.data();
+    const float* B = b.data();
+    float* C = c.data();
+    const size_t rows_per = (M + n_threads - 1) / n_threads;
+
+    std::vector<std::thread> pool;
+    pool.reserve(n_threads);
+    for (size_t t = 0; t < n_threads; ++t) {
+        const size_t i0 = t * rows_per;
+        const size_t i1 = std::min(M, i0 + rows_per);
+        if (i0 >= i1) break;
+        // Each thread writes only rows [i0, i1) of C. A and B are read
+        // by everyone, which is safe: concurrent reads need no lock.
+        pool.emplace_back(simd_rows, A, B, C, K, N, i0, i1);
+    }
+    for (auto& th : pool) th.join();
     return c;
 }
 

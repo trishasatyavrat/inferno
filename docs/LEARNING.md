@@ -240,3 +240,81 @@ run the model; the rest is wiring.
 - "Why does softmax subtract the max?" - any numerical-stability write-up
 - Kahan summation (Wikipedia) - the more sophisticated answer to the
   accumulator problem we solved with `double`
+
+---
+
+## Day 5 (2026-09-18): Multithreading - the last CPU lever
+
+**What we built:** `matmul_threaded` - the SIMD kernel with the rows of
+C divided across threads (`std::thread`, one per core by default). The
+SIMD inner loop was pulled out into `simd_rows(A, B, C, K, N, i0, i1)`
+so both `matmul_simd` and the threaded version run *identical* code;
+the only difference is who calls it with which row range. The benchmark
+gained a threaded column, an N=1024 row, and a block of GPT-2-shaped
+cases, because square matrices are a proxy and (T x 768) @ (768 x 2304)
+is the real workload.
+
+**Measured (Apple Silicon, 11 hardware threads, -O2):**
+
+| N | naive | reordered | simd | threaded |
+|---|---|---|---|---|
+| 64 | 2.1 | 26.5 | 43.8 | **9.7** (slower!) |
+| 128 | 2.1 | 35.9 | 35.3 | 36.0 |
+| 256 | 1.9 | 26.3 | 30.6 | 94.6 |
+| 512 | 2.0 | 27.6 | 29.8 | **136.4** |
+| 1024 | - | 27.2 | 24.8 | 81.6 |
+
+GPT-2 shapes: at T=1 (generating one token) threading buys nothing
+(19.7 vs 21.4 GFLOP/s); at T=64 it is 2.6x; at T=1024 it is 4-5x.
+
+**The concepts:**
+
+- **Why rows, and why no locks.** Row i of C depends on row i of A and
+  *all* of B. Two threads never write the same element of C, and
+  concurrent *reads* of A and B are always safe. So each thread gets a
+  contiguous slice of rows and there is nothing to synchronize until
+  `join()`. This is the textbook "embarrassingly parallel" shape; the
+  data-race question that makes threading hard does not arise here,
+  and it is worth being able to say exactly why.
+
+- **Threading made N=64 slower.** Spawning a thread costs tens of
+  microseconds; a 64x64 matmul is a few microseconds of work. The
+  function guards against this (at least 16 rows per thread, never
+  more threads than that allows) but at N=64 that still means 4
+  threads for ~8us of work each. Real libraries keep a persistent
+  thread *pool* to avoid paying the spawn cost per call - that is the
+  next optimization if this ever matters, and knowing *why* it would
+  help is the point.
+
+- **N=1024 dropped from 136 to 82 GFLOP/s.** Every one of the 11
+  threads streams through the whole of B (4 MB at N=1024) for each of
+  its rows. Eleven threads pulling the same 4 MB through a shared
+  cache and memory bus compete for bandwidth; at N=512, B is 1 MB and
+  fits comfortably. The fix would be cache blocking *combined with*
+  threading, so each thread's working set of B stays small - the tiling
+  idea from Day 3 that lost on its own becomes necessary once threads
+  multiply the memory traffic. Optimizations interact; the benchmark
+  table is how you find out.
+
+- **T=1 is the generation bottleneck and threads do not help it.**
+  When the model generates one token at a time, every matmul is
+  (1 x 768) @ (768 x N): one row of C, nothing to split. Throughput
+  there is bounded by reading the weight matrix from memory once per
+  token - memory bandwidth, not compute. This is why inference engines
+  obsess over weight size (quantization) and batching, and why a KV
+  cache matters: it is the thing that keeps generation from
+  recomputing T rows when only one is new.
+
+**Do now:**
+1. `make bench` - confirm threaded loses at 64 and wins at 512 on your
+   machine.
+2. Change `min_rows_per_thread` to 1 and re-run; watch the small-N
+   column get worse. Then try 64.
+3. Explain out loud why two threads writing to *different rows* of the
+   same `std::vector<float>` is safe. (Hint: the vector's memory does
+   not move once allocated, and no thread resizes it.)
+
+**Resources:**
+- cppreference `std::thread` + `std::thread::hardware_concurrency`
+- "Amdahl's law" (any source) - why the T=1 case cannot be helped
+- Drepper §6.4 (multi-threaded optimizations) - bandwidth contention
