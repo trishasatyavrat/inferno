@@ -715,3 +715,95 @@ against `tiktoken` that runs automatically once the real files exist.
   Subword Units" - the original BPE-for-NLP paper, §3.2
 - OpenAI's original `encoder.py` (gpt-2 repo) - 100 lines; ours is a
   translation of it
+
+---
+
+## Day 11 (2026-09-18): KV cache, and the honest benchmark
+
+**What we built:** `KVCache` (`model.h`) - per-layer K and V for every
+position seen so far - `attention_cached()`, an incremental
+`gpt2_forward(model, new_tokens, cache)`, and a generation loop that
+prefills the prompt once and then pushes *one row* through the model
+per token. Plain `attention()` is now the cached version with a
+throwaway cache, so the Day 6 tests cover both. `--no-cache` keeps the
+old loop for comparison. And `make bench-e2e`: inferno against PyTorch
+on the full 124M model.
+
+**Measured (Apple Silicon, 11 threads; torch 2.13 CPU, 5 threads):**
+
+| | inferno | torch |
+|---|---|---|
+| forward, 64 tokens | 358 ms | 35 ms |
+| generate 32 tokens, full recompute | 7.63 s (4.2 tok/s) | 0.80 s (39.9 tok/s) |
+| generate 32 tokens, KV cache | 0.79 s (40.5 tok/s) | - |
+| decode step (1 token, 64 cached) | 20 ms | - |
+
+The cache is a 9.7x speedup on our own baseline. Against PyTorch we
+are 10x slower per forward pass, and our cached loop only ties torch's
+*uncached* loop. That is the true state of the project and it belongs
+in the README as written.
+
+**The concepts:**
+
+- **What the cache stores and why it is enough.** In attention, token
+  i needs K and V for every token 0..i. Those depend only on each
+  token's own input to the layer - not on what comes after - so once
+  computed they never change. Cache them per layer (12 x 2 x (n_ctx x
+  768) floats = 75 MB at full context) and a new token needs only its
+  *own* Q, K, V plus a read of the cache. The prompt is "prefilled" in
+  one parallel pass; every token after it costs one row.
+
+- **Why 9.7x and not more.** Full recompute for 16+32 tokens pushes
+  16+17+...+47 = 1008 rows through the model; the cache pushes 16 + 32
+  = 48. That is 21x less work, but a single-row matmul is far less
+  efficient than a 47-row one (T=1 cannot use threads: one row, nothing
+  to split - Day 5's table showed 20 GFLOP/s at T=1 vs 88 at T=1024).
+  Less work at lower efficiency lands at ~10x. Both effects are in the
+  Day 5 numbers if you look.
+
+- **Decode is memory-bound, and we are not at the floor.** Each token
+  reads all 496 MB of weights once. At 20 ms per token that is 25 GB/s;
+  this machine's memory can deliver several times that. The gap is
+  that (1 x 768) @ (768 x 3072) runs on one thread because
+  `matmul_threaded` splits rows and there is one row. `matmul_bt`
+  already splits columns for tiny M (the LM head); `matmul_threaded`
+  should too. That is the next optimization and it is worth an
+  estimated 3-4x on decode - the number to beat is 20 ms.
+
+- **Why torch is 10x faster on the forward pass.** Its matmul is
+  Apple's Accelerate BLAS: hand-tuned kernels near 1 TFLOP/s on this
+  chip versus our 136 GFLOP/s peak - and ours is the *peak*; attention
+  at T=64 runs many small matmuls, each with a Tensor allocation, a
+  slice copy, a K^T copy. The Day 3 lesson applies at a larger scale:
+  the arithmetic is not the bottleneck, the memory traffic around it
+  is. Fusing the per-head copies away and reusing buffers is the
+  second-next optimization.
+
+- **Ties are honest results.** "Our cached loop matches PyTorch's
+  uncached loop" is a fair sentence; "we match PyTorch" is not. An
+  interviewer who knows this domain will ask what torch does with a
+  cache (HF `generate` uses one) and the answer is "it would be
+  several times faster than us." Saying so first is the credibility.
+
+- **The refactor that made this small.** Because `attention()` became
+  `attention_cached()` with an empty cache, the incremental path and
+  the batch path are the same 60 lines. One implementation, two
+  callers, one test suite. If they had been two copies, they would
+  have drifted.
+
+**Do now:**
+1. `make bench-e2e` - your numbers will differ; the ratios should not.
+2. `./build/inferno /tmp/toy261.bin --prompt "hello" --n 30` with and
+   without `--no-cache` - on a toy model the difference is small; ask
+   why (hint: what dominates when the weights are tiny?).
+3. Sketch the column-split for `matmul_threaded` when M is small - each
+   thread computes C[:, j0:j1]. What does it need that the row split
+   did not? (Answer: each thread reads *all* of A, but A is one row.)
+
+**Resources:**
+- "Efficiently Scaling Transformer Inference" (Pope et al. 2022) §3 -
+  the prefill/decode split and why decode is memory-bound
+- llama.cpp's `ggml` KV cache discussion (issues/wiki) - the same
+  structure, production-grade
+- Apple Accelerate BLAS docs - what 1 TFLOP/s of tuned kernels looks
+  like from the outside

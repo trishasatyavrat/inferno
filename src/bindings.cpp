@@ -126,12 +126,23 @@ struct PyGPT2 {
     }
 
     std::vector<int> generate(const std::vector<int>& prompt, size_t max_new,
-                              float temperature, size_t top_k, uint32_t seed) {
+                              float temperature, size_t top_k, uint32_t seed, bool use_cache) {
         inferno::SampleOptions opt;
         opt.temperature = temperature;
         opt.top_k = top_k;
         opt.seed = seed;
+        opt.use_cache = use_cache;
         return inferno::generate(w, prompt, max_new, opt);
+    }
+
+    // Feed the chunks through a fresh cache one after another and return
+    // the logits of the last chunk. Lets tests check that prefill + steps
+    // equals one full forward pass.
+    py::array_t<float> forward_chunked(const std::vector<std::vector<int>>& chunks) {
+        inferno::KVCache cache(w.cfg);
+        Tensor logits;
+        for (const auto& c : chunks) logits = inferno::gpt2_forward(w, c, cache);
+        return to_numpy(logits);
     }
 };
 
@@ -168,7 +179,9 @@ PYBIND11_MODULE(inferno_core, m) {
         .def("forward", &PyGPT2::forward, "token ids -> logits (T, n_vocab)")
         .def("generate", &PyGPT2::generate, "prompt ids -> prompt + generated ids",
              py::arg("prompt"), py::arg("max_new") = 20, py::arg("temperature") = 0.8f,
-             py::arg("top_k") = 40, py::arg("seed") = 1);
+             py::arg("top_k") = 40, py::arg("seed") = 1, py::arg("use_cache") = true)
+        .def("forward_chunked", &PyGPT2::forward_chunked,
+             "run chunks through a KV cache in sequence; logits of the last chunk");
     py::class_<inferno::Tokenizer>(m, "Tokenizer")
         .def(py::init<const std::string&>(), py::arg("path"))
         .def("encode", &inferno::Tokenizer::encode, py::arg("text"))

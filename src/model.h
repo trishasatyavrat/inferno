@@ -36,6 +36,22 @@ struct GPT2Weights {
     Tensor lnf_g, lnf_b;  // final LayerNorm
 };
 
+// Per-layer K and V for every position processed so far. Generation
+// appends one token at a time; without this, step t would recompute
+// K and V for all t-1 earlier tokens in every layer, only to get the
+// same numbers back.
+struct KVCache {
+    std::vector<Tensor> k, v;  // n_layer x (n_ctx, C)
+    size_t len = 0;            // positions filled
+
+    explicit KVCache(const GPT2Config& c) {
+        for (size_t i = 0; i < c.n_layer; ++i) {
+            k.emplace_back(std::vector<size_t>{c.n_ctx, c.n_embd});
+            v.emplace_back(std::vector<size_t>{c.n_ctx, c.n_embd});
+        }
+    }
+};
+
 // One block: x + attn(ln1(x)), then x + mlp(ln2(x)).
 // "Pre-norm" - LayerNorm goes *before* each sublayer, not after; that is
 // the GPT-2 ordering (the original Transformer was post-norm).
@@ -44,5 +60,12 @@ Tensor transformer_block(const Tensor& x, const BlockWeights& w, size_t n_head);
 // Full forward pass: token ids -> logits (T, n_vocab). Row t is the
 // model's score for every possible next token after position t.
 Tensor gpt2_forward(const GPT2Weights& model, const std::vector<int>& tokens);
+
+// Incremental forward pass. `tokens` are NEW tokens to append after the
+// cache->len positions already processed; returns logits for those new
+// rows only and advances the cache. Calling this with the whole prompt
+// on an empty cache, then one token at a time, produces exactly the
+// logits gpt2_forward would - at a fraction of the work.
+Tensor gpt2_forward(const GPT2Weights& model, const std::vector<int>& tokens, KVCache& cache);
 
 } // namespace inferno

@@ -188,6 +188,35 @@ def check_gpt2(cfg, p, tokens, rtol=2e-3, atol=2e-3):
     if not np.array_equal(ours.argmax(-1), theirs.argmax(-1)):
         raise AssertionError("gpt2 argmax disagrees")
 
+def check_kv_cache(small, p_small, full, p_full, rng):
+    for cfg, p, T in ((small, p_small, 12), (full, p_full, 6)):
+        model = inferno_core.GPT2(cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_head"],
+                                  cfg["n_layer"], p)
+        toks = [int(v) for v in rng.integers(0, cfg["n_vocab"], size=T)]
+        full_logits = model.forward(toks)
+        # Prefill 3 tokens, then one at a time: the last row must match
+        # the full pass's last row. Also a mid-sized chunk split.
+        for chunks in ([toks[:3]] + [[t] for t in toks[3:]], [toks[:T // 2], toks[T // 2:]], [toks]):
+            last = model.forward_chunked(chunks)[-1]
+            if not np.allclose(last, full_logits[-1], rtol=1e-4, atol=1e-4):
+                raise AssertionError(f"kv-cache logits diverge (cfg n_embd={cfg['n_embd']}, "
+                                     f"chunks={[len(c) for c in chunks]}): "
+                                     f"max diff {np.abs(last - full_logits[-1]).max()}")
+            if int(last.argmax()) != int(full_logits[-1].argmax()):
+                raise AssertionError("kv-cache argmax differs from full forward")
+
+    model = inferno_core.GPT2(small["n_vocab"], small["n_ctx"], small["n_embd"], small["n_head"],
+                              small["n_layer"], p_small)
+    prompt = [7, 3, 9]
+    for temp, seed in ((0.0, 1), (1.0, 5), (0.7, 11)):
+        a = model.generate(prompt, max_new=10, temperature=temp, seed=seed, use_cache=True)
+        b = model.generate(prompt, max_new=10, temperature=temp, seed=seed, use_cache=False)
+        if a != b:
+            raise AssertionError(f"cached vs uncached generation differ at temp={temp}: {a} vs {b}")
+    # Cache honors n_ctx exactly like the baseline.
+    if len(model.generate(prompt, max_new=100, temperature=0.0)) != small["n_ctx"]:
+        raise AssertionError("cached generate did not stop at n_ctx")
+
 def check_sampling(cfg, p, rng):
     model = inferno_core.GPT2(cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_head"],
                               cfg["n_layer"], p)
@@ -312,6 +341,10 @@ def main():
         if loaded.n_params() != expected:
             raise AssertionError(f"n_params {loaded.n_params()} != {expected}")
     print("checkpoint round-trip: loader reproduces dict-built model bit-for-bit")
+
+    check_kv_cache(small, p_small, full, p_full, rng)
+    print("kv cache: prefill + single steps == full forward (toy and 124M); "
+          "cached generation == uncached, greedy and sampled")
 
     check_sampling(small, p_small, rng)
     print("generation: greedy == argmax loop, seeds reproduce, top-k respected, "

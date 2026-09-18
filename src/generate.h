@@ -15,6 +15,7 @@ struct SampleOptions {
     float temperature = 1.0f;  // 0 = greedy (always the argmax)
     size_t top_k = 40;         // 0 = consider the whole vocabulary
     uint32_t seed = 0;         // fixed seed = reproducible output
+    bool use_cache = true;     // false = recompute everything each step (the baseline)
 };
 
 // Turn a user-facing seed into an RNG state. xorshift's first outputs
@@ -34,9 +35,10 @@ int sample_next(const float* logits, size_t V, const SampleOptions& opt, uint32_
 // called with each new token as it is produced - that is what lets a
 // UI stream output instead of waiting for the whole thing.
 //
-// This version recomputes the full forward pass over every token at
-// every step: O(T^2) work for T tokens. That is the honest baseline the
-// KV cache will be measured against.
+// With use_cache (default) the prompt is run once and then each new
+// token costs one row through the model. With use_cache = false every
+// step recomputes the full forward pass: O(T^2) work, kept as the
+// baseline the cache is measured against (`inferno --no-cache`).
 std::vector<int> generate(const GPT2Weights& model, std::vector<int> tokens,
                           size_t max_new, const SampleOptions& opt,
                           const std::function<void(int)>& on_token = nullptr);

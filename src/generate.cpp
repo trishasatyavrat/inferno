@@ -69,16 +69,35 @@ std::vector<int> generate(const GPT2Weights& model, std::vector<int> tokens,
     uint32_t rng_state = seed_rng(opt.seed);
     const size_t V = model.cfg.n_vocab;
 
+    if (!opt.use_cache) {
+        for (size_t step = 0; step < max_new; ++step) {
+            if (tokens.size() >= model.cfg.n_ctx) break;  // the position table ends here
+            Tensor logits = gpt2_forward(model, tokens);
+            // Only the last row matters: it is the prediction for what
+            // comes *after* the final token. Every other row was
+            // recomputed for nothing - the waste the cache removes.
+            const float* last = logits.data() + (logits.shape()[0] - 1) * V;
+            const int next = sample_next(last, V, opt, rng_state);
+            tokens.push_back(next);
+            if (on_token) on_token(next);
+        }
+        return tokens;
+    }
+
+    if (tokens.size() > model.cfg.n_ctx) throw std::invalid_argument("generate: prompt longer than n_ctx");
+    KVCache cache(model.cfg);
+    // Prefill: the whole prompt in one pass (T rows, fully parallel).
+    Tensor logits = gpt2_forward(model, tokens, cache);
     for (size_t step = 0; step < max_new; ++step) {
-        if (tokens.size() >= model.cfg.n_ctx) break;  // the position table ends here
-        Tensor logits = gpt2_forward(model, tokens);
-        // Only the last row matters: it is the prediction for what comes
-        // *after* the final token. Every other row was recomputed for
-        // nothing - the waste the KV cache exists to remove.
+        if (tokens.size() >= model.cfg.n_ctx) break;
         const float* last = logits.data() + (logits.shape()[0] - 1) * V;
         const int next = sample_next(last, V, opt, rng_state);
         tokens.push_back(next);
         if (on_token) on_token(next);
+        if (tokens.size() >= model.cfg.n_ctx) break;
+        // Decode step: one new row through the model; K and V for every
+        // earlier position are read from the cache, not recomputed.
+        logits = gpt2_forward(model, {next}, cache);
     }
     return tokens;
 }

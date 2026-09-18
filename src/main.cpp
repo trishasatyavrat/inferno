@@ -7,6 +7,7 @@
 //     --temp T     sampling temperature, 0 = greedy (default 0.8)
 //     --top-k K    keep the K most likely tokens, 0 = all (default 40)
 //     --seed S     random seed (default 1)
+//     --no-cache   recompute the full forward pass every step (baseline)
 //
 // Loads a checkpoint, then generates from the prompt and streams the
 // output. With --prompt, text goes in and text comes out through the
@@ -53,6 +54,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--temp"))  opt.temperature = std::strtof(need("--temp"), nullptr);
         else if (!std::strcmp(argv[i], "--top-k")) opt.top_k = std::strtoul(need("--top-k"), nullptr, 10);
         else if (!std::strcmp(argv[i], "--seed"))  opt.seed = static_cast<uint32_t>(std::strtoul(need("--seed"), nullptr, 10));
+        else if (!std::strcmp(argv[i], "--no-cache")) opt.use_cache = false;
         else if (!std::strcmp(argv[i], "--prompt")) { prompt_text = need("--prompt"); have_text = true; }
         else if (!std::strcmp(argv[i], "--tokenizer")) tokenizer_path = need("--tokenizer");
         else if (argv[i][0] == '-' && !std::isdigit(static_cast<unsigned char>(argv[i][1]))) { usage(argv[0]); return 2; }
@@ -116,7 +118,8 @@ int main(int argc, char** argv) {
     auto t3 = Clock::now();
     const double secs = std::chrono::duration<double>(t3 - t2).count();
     if (tok) std::printf("\n---");
-    std::printf("\n%zu tokens in %.2fs (%.1f tok/s, full recompute each step)\n",
-                produced, secs, produced / secs);
+    std::printf("\n%zu tokens in %.2fs (%.1f tok/s, %s)\n",
+                produced, secs, produced / secs,
+                opt.use_cache ? "KV cache" : "full recompute each step");
     return 0;
 }

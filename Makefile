@@ -9,7 +9,7 @@ build/test_tensor: $(SRC) $(TESTS) $(HDRS)
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(SRC) $(TESTS) -o $@
 
-.PHONY: test clean pymodule pytest bench inferno weights
+.PHONY: test clean pymodule pytest bench bench-e2e inferno weights
 
 test: build/test_tensor
 	./build/test_tensor
@@ -36,6 +36,10 @@ build/bench_matmul: $(SRC) bench/bench_matmul.cpp $(HDRS)
 
 bench: build/bench_matmul
 	./build/bench_matmul
+
+# End-to-end: inferno vs PyTorch on the full 124M model (needs .venv).
+bench-e2e: pymodule
+	$(PY) bench/bench_e2e.py
 
 # The command-line tool: build/inferno <weights.bin> <token ids...>
 build/inferno: $(SRC) src/main.cpp $(HDRS)

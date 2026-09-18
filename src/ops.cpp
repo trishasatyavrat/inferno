@@ -126,25 +126,19 @@ static Tensor slice_cols(const Tensor& t, size_t c0, size_t width) {
     return out;
 }
 
-// The transpose of a column slice: (rows, width) -> (width, rows).
-// Materialized so K^T can go through the same optimized matmul as
-// everything else, rather than needing a second strided kernel.
-static Tensor slice_cols_transposed(const Tensor& t, size_t c0, size_t width) {
-    const size_t rows = t.shape()[0], cols = t.shape()[1];
-    Tensor out({width, rows});
-    for (size_t i = 0; i < rows; ++i)
-        for (size_t j = 0; j < width; ++j)
-            out.data()[j * rows + i] = t.data()[i * cols + c0 + j];
-    return out;
-}
-
-Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
-                 const Tensor& w_proj, const Tensor& b_proj, size_t n_head) {
-    const size_t T = x.shape()[0], C = x.shape()[1];
+Tensor attention_cached(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
+                        const Tensor& w_proj, const Tensor& b_proj, size_t n_head,
+                        Tensor& k_cache, Tensor& v_cache, size_t start) {
+    const size_t n = x.shape()[0], C = x.shape()[1];
     if (n_head == 0 || C % n_head != 0)
         throw std::invalid_argument("attention: C must be divisible by n_head");
     if (w_qkv.shape()[0] != C || w_qkv.shape()[1] != 3 * C)
         throw std::invalid_argument("attention: w_qkv must be (C, 3C)");
+    if (k_cache.shape()[1] != C || v_cache.shape()[1] != C)
+        throw std::invalid_argument("attention: cache width must be C");
+    const size_t L = start + n;  // total positions after this call
+    if (L > k_cache.shape()[0])
+        throw std::invalid_argument("attention: cache full (sequence longer than n_ctx)");
     const size_t hs = C / n_head;  // head size: 64 for GPT-2 small
     const float scale = 1.0f / std::sqrt(static_cast<float>(hs));
 
@@ -153,36 +147,63 @@ Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
     // GPT-2 made (one big matmul beats three), and we inherit it.
     Tensor qkv = linear(x, w_qkv, b_qkv);
 
-    Tensor concat({T, C});  // every head's output, side by side
-    for (size_t h = 0; h < n_head; ++h) {
-        Tensor q  = slice_cols(qkv, h * hs, hs);                 // (T, hs)
-        Tensor kT = slice_cols_transposed(qkv, C + h * hs, hs);  // (hs, T)
-        Tensor v  = slice_cols(qkv, 2 * C + h * hs, hs);         // (T, hs)
+    // Append this call's K and V rows to the cache at their positions.
+    // Everything before `start` was written by earlier calls and is
+    // exactly what this call would have recomputed - that is the saving.
+    for (size_t i = 0; i < n; ++i) {
+        std::copy(qkv.data() + i * 3 * C + C,     qkv.data() + i * 3 * C + 2 * C,
+                  k_cache.data() + (start + i) * C);
+        std::copy(qkv.data() + i * 3 * C + 2 * C, qkv.data() + (i + 1) * 3 * C,
+                  v_cache.data() + (start + i) * C);
+    }
 
-        // scores[i][j] = how much token i attends to token j.
-        Tensor scores = matmul_threaded(q, kT);                  // (T, T)
+    Tensor concat({n, C});  // every head's output, side by side
+    for (size_t h = 0; h < n_head; ++h) {
+        Tensor q = slice_cols(qkv, h * hs, hs);                       // (n, hs)
+        // K^T and V over ALL L positions, read from the cache.
+        Tensor kT({hs, L});
+        for (size_t j = 0; j < L; ++j)
+            for (size_t d = 0; d < hs; ++d)
+                kT.data()[d * L + j] = k_cache.data()[j * C + h * hs + d];
+        Tensor v({L, hs});
+        for (size_t j = 0; j < L; ++j)
+            std::copy(v_cache.data() + j * C + h * hs, v_cache.data() + j * C + (h + 1) * hs,
+                      v.data() + j * hs);
+
+        // scores[i][j] = how much new token i (at position start+i)
+        // attends to position j.
+        Tensor scores = matmul_threaded(q, kT);                       // (n, L)
         float* S = scores.data();
-        for (size_t i = 0; i < T; ++i) {
-            for (size_t j = 0; j < T; ++j) {
-                if (j > i)
+        for (size_t i = 0; i < n; ++i) {
+            const size_t pos = start + i;
+            for (size_t j = 0; j < L; ++j) {
+                if (j > pos)
                     // Causal mask: -inf becomes exp(-inf) = 0 in softmax,
-                    // so token i puts zero weight on any token after it.
-                    S[i * T + j] = -std::numeric_limits<float>::infinity();
+                    // so a token puts zero weight on anything after it.
+                    S[i * L + j] = -std::numeric_limits<float>::infinity();
                 else
                     // Scale by 1/sqrt(head size) so dot products of
                     // 64-dim vectors do not saturate the softmax.
-                    S[i * T + j] *= scale;
+                    S[i * L + j] *= scale;
             }
         }
-        Tensor weights = softmax(scores);                        // rows sum to 1
-        Tensor out_h = matmul_threaded(weights, v);              // (T, hs)
+        Tensor weights = softmax(scores);                             // rows sum to 1
+        Tensor out_h = matmul_threaded(weights, v);                   // (n, hs)
 
-        for (size_t i = 0; i < T; ++i)
+        for (size_t i = 0; i < n; ++i)
             std::copy(out_h.data() + i * hs, out_h.data() + (i + 1) * hs,
                       concat.data() + i * C + h * hs);
     }
 
     return linear(concat, w_proj, b_proj);
+}
+
+Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
+                 const Tensor& w_proj, const Tensor& b_proj, size_t n_head) {
+    // A throwaway cache exactly the size of this sequence.
+    const size_t T = x.shape()[0], C = x.shape()[1];
+    Tensor k({T, C}), v({T, C});
+    return attention_cached(x, w_qkv, b_qkv, w_proj, b_proj, n_head, k, v, 0);
 }
 
 Tensor mlp(const Tensor& x, const Tensor& w_fc, const Tensor& b_fc,

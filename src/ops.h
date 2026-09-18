@@ -52,6 +52,15 @@ Tensor linear(const Tensor& x, const Tensor& w, const Tensor& b);
 Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
                  const Tensor& w_proj, const Tensor& b_proj, size_t n_head);
 
+// The same attention, incremental. x holds only the NEW tokens (n rows)
+// whose positions are [start, start+n). k_cache / v_cache are (n_ctx, C)
+// tensors holding K and V for every position seen so far; this call
+// writes the new rows in and attends over everything up to start+n.
+// Plain attention() is this with an empty cache and start = 0.
+Tensor attention_cached(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
+                        const Tensor& w_proj, const Tensor& b_proj, size_t n_head,
+                        Tensor& k_cache, Tensor& v_cache, size_t start);
+
 // The MLP (feed-forward) half of a transformer block:
 //   gelu(x @ w_fc + b_fc) @ w_proj + b_proj
 // w_fc is (C, 4C): GPT-2 expands to 3072 channels, applies GELU, and
