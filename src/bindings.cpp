@@ -55,6 +55,23 @@ static py::array_t<float> py_gelu(py::array_t<float, py::array::c_style | py::ar
     return to_numpy(inferno::gelu(from_numpy(x)));
 }
 
+using Arr = py::array_t<float, py::array::c_style | py::array::forcecast>;
+
+// 1D numpy vector -> (1, n) Tensor. Biases arrive this way.
+static Tensor from_numpy_1d(Arr v) {
+    return from_numpy(v.reshape({static_cast<py::ssize_t>(1), v.size()}));
+}
+
+static py::array_t<float> py_linear(Arr x, Arr w, Arr b) {
+    return to_numpy(inferno::linear(from_numpy(x), from_numpy(w), from_numpy_1d(b)));
+}
+
+static py::array_t<float> py_attention(Arr x, Arr w_qkv, Arr b_qkv, Arr w_proj, Arr b_proj,
+                                       size_t n_head) {
+    return to_numpy(inferno::attention(from_numpy(x), from_numpy(w_qkv), from_numpy_1d(b_qkv),
+                                       from_numpy(w_proj), from_numpy_1d(b_proj), n_head));
+}
+
 PYBIND11_MODULE(inferno_core, m) {
     m.doc() = "inferno: hand-built tensor ops, exposed to Python";
     m.def("matmul", &py_matmul, "C = A @ B, computed by inferno's C++ engine");
@@ -62,4 +79,8 @@ PYBIND11_MODULE(inferno_core, m) {
           py::arg("x"), py::arg("gamma"), py::arg("beta"), py::arg("eps") = 1e-5f);
     m.def("softmax", &py_softmax, "row-wise softmax");
     m.def("gelu", &py_gelu, "GELU (tanh approximation, as in GPT-2)");
+    m.def("linear", &py_linear, "x @ w + b (w is (in, out))");
+    m.def("attention", &py_attention, "causal multi-head self-attention, GPT-2 layout",
+          py::arg("x"), py::arg("w_qkv"), py::arg("b_qkv"), py::arg("w_proj"), py::arg("b_proj"),
+          py::arg("n_head"));
 }

@@ -318,3 +318,77 @@ GPT-2 shapes: at T=1 (generating one token) threading buys nothing
 - cppreference `std::thread` + `std::thread::hardware_concurrency`
 - "Amdahl's law" (any source) - why the T=1 case cannot be helped
 - Drepper §6.4 (multi-threaded optimizations) - bandwidth contention
+
+---
+
+## Day 6 (2026-09-18): Attention - the operation the model is named after
+
+**What we built:** `attention()` in `src/ops.cpp` - causal multi-head
+self-attention, one full GPT-2 attention layer - plus the two small
+pieces it needs, `linear()` (x @ w + b) and `add()` (the residual
+connection). Verified against a from-scratch PyTorch reference at seven
+shapes including GPT-2 small's real dimensions (C=768, 12 heads), and
+against a *causality* property test.
+
+**The concepts:**
+
+- **What attention computes, in one sentence per step.** For each token,
+  produce a query, a key, and a value vector (`linear` with the fused
+  `w_qkv`). Score every (token i, token j) pair by the dot product of
+  q_i and k_j. Mask out j > i. Softmax each row so the scores become
+  weights summing to 1. Each token's output is the weighted sum of the
+  value vectors. Do this 12 times in parallel on 64-dim slices ("heads")
+  and concatenate. Project once more. Every line of the C++ maps to one
+  of those sentences.
+
+- **Why the 1/sqrt(64) scale.** A dot product of two 64-dim vectors with
+  unit-variance entries has variance 64; feeding numbers that large into
+  softmax makes it one-hot and kills the gradient signal the model was
+  trained with. Dividing by sqrt(head size) restores unit variance. It is
+  in the original "Attention Is All You Need" paper for exactly this
+  reason.
+
+- **The causal mask is -inf, not 0.** Setting a score to 0 would give
+  future tokens a *nonzero* weight after softmax (exp(0) = 1). Setting it
+  to -inf makes exp(-inf) = 0 exactly. Our softmax subtracts the row max
+  first, and the diagonal is never masked, so the max is always finite
+  and the -inf entries become clean zeros. The `check_causality` test
+  proves it: perturb the last token, and every earlier output row is
+  bit-for-bit unchanged.
+
+- **The test needed realistic weight scale to be meaningful.** With
+  unit-scale random weights the scores are huge, softmax saturates to
+  one-hot, and a wrong implementation can agree with the reference by
+  accident because everything rounds to "attend to yourself". Scaling
+  weights by 1/sqrt(C), as trained networks are, keeps the softmax in
+  its sensitive range where bugs show. Test inputs are part of the test.
+
+- **K^T is materialized on purpose.** A transposed slice is copied into a
+  fresh (hs, T) tensor so Q @ K^T can go through the same `matmul_threaded`
+  as everything else. The copy is O(T x hs); the matmul it feeds is
+  O(T x T x hs). Paying a small copy to reuse one fast kernel beats
+  writing a second strided kernel - a tradeoff worth being able to defend.
+
+- **The dtype bug was in the test, not the C++.** `1.0 / np.sqrt(C)` is
+  a NumPy float64 *scalar*, and under NumPy 2's promotion rules a NumPy
+  scalar promotes a float32 array to float64, where a plain Python float
+  would not. Our binding silently force-casts back to float32, so the
+  C++ side was fine; PyTorch refused to multiply float32 by float64 and
+  that is what surfaced it. Lesson: know your library's type-promotion
+  rules, and know that they changed in NumPy 2.
+
+**Do now:**
+1. `make pytest` - attention agrees at 7 shapes.
+2. In `attention()`, change the mask condition to `j >= i` and rerun.
+   The diagonal is now masked and row 0 has *no* valid entries - what
+   happens to the softmax? (Read the output; it is a NaN lesson.)
+3. Hand-compute attention for T=2, C=2, one head, with weights of your
+   choosing. Compare against `inferno_core.attention`.
+
+**Resources:**
+- "The Illustrated Transformer" (Jay Alammar) - the pictures for every
+  step above
+- Karpathy, "Let's build GPT" (video) - attention written the same long
+  way as our reference test
+- "Attention Is All You Need" §3.2.1 - the scaling argument, two
+  paragraphs

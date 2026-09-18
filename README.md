@@ -14,8 +14,8 @@ understand exactly what runs when a language model generates a word.
 
 Early. Every operation GPT-2 needs - matmul, LayerNorm, softmax, GELU -
 is implemented and verified against PyTorch; matmul is optimized to
-~70x its naive baseline (SIMD + threads). Next: assembling the ops into
-attention blocks.
+~70x its naive baseline (SIMD + threads). Causal multi-head attention
+is built and verified at GPT-2's real dimensions. Next: the full block.
 
 - [x] Tensor type (float32, row-major) + naive matmul + tests
 - [x] Python bindings (pybind11) + correctness harness vs PyTorch
@@ -24,7 +24,8 @@ attention blocks.
 - [x] Core ops: LayerNorm, softmax, GELU (verified vs PyTorch at
       GPT-2 dimensions, including the 50257-wide vocabulary)
 - [x] Multithreading across output rows (rows of C split across cores)
-- [ ] Attention block + MLP block assembled from the ops
+- [x] Causal multi-head attention (fused QKV, 12 heads, verified vs PyTorch)
+- [ ] MLP block + full transformer block + GPT-2 forward pass
 - [ ] Load real GPT-2 weights → first generated text
 - [ ] End-to-end benchmark vs PyTorch CPU
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)

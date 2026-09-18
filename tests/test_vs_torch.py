@@ -70,6 +70,65 @@ def check_gelu(rows, cols, rng):
     if not np.allclose(ours, theirs, rtol=RTOL, atol=ATOL):
         raise AssertionError(f"gelu mismatch: max diff {np.abs(ours - theirs).max()}")
 
+def torch_attention(x, w_qkv, b_qkv, w_proj, b_proj, n_head):
+    """Reference causal self-attention, written the long way in PyTorch.
+
+    This is the textbook version (nanoGPT's, with weights in GPT-2's
+    (in, out) layout). If our C++ agrees with it at random weights across
+    shapes, the wiring - fused QKV split, per-head slicing, scaling, the
+    causal mask, concatenation, output projection - is right.
+    """
+    T, C = x.shape
+    hs = C // n_head
+    qkv = x @ w_qkv + b_qkv
+    q, k, v = qkv.split(C, dim=1)
+    q = q.view(T, n_head, hs).transpose(0, 1)  # (n_head, T, hs)
+    k = k.view(T, n_head, hs).transpose(0, 1)
+    v = v.view(T, n_head, hs).transpose(0, 1)
+    att = (q @ k.transpose(-2, -1)) / (hs ** 0.5)  # (n_head, T, T)
+    mask = torch.tril(torch.ones(T, T, dtype=torch.bool))
+    att = att.masked_fill(~mask, float("-inf"))
+    att = torch.softmax(att, dim=-1)
+    y = (att @ v).transpose(0, 1).reshape(T, C)
+    return y @ w_proj + b_proj
+
+def check_attention(T, C, n_head, rng):
+    # Weight scale ~ 1/sqrt(C), as trained networks have; unit-scale
+    # random weights would blow the softmax into one-hot territory and
+    # hide bugs behind saturated outputs.
+    s = float(1.0 / np.sqrt(C))
+    x = rng.standard_normal((T, C), dtype=np.float32)
+    w_qkv = (rng.standard_normal((C, 3 * C), dtype=np.float32) * s)
+    b_qkv = (rng.standard_normal(3 * C, dtype=np.float32) * 0.1)
+    w_proj = (rng.standard_normal((C, C), dtype=np.float32) * s)
+    b_proj = (rng.standard_normal(C, dtype=np.float32) * 0.1)
+    ours = inferno_core.attention(x, w_qkv, b_qkv, w_proj, b_proj, n_head)
+    t = lambda a: torch.from_numpy(a)
+    theirs = torch_attention(t(x), t(w_qkv), t(b_qkv), t(w_proj), t(b_proj), n_head).numpy()
+    if not np.allclose(ours, theirs, rtol=1e-3, atol=1e-4):
+        raise AssertionError(f"attention mismatch (T={T}, C={C}, heads={n_head}): "
+                             f"max diff {np.abs(ours - theirs).max()}")
+
+def check_causality(rng):
+    # The property that makes it "causal": changing token j must not
+    # change any output row i < j. Perturb the last token and confirm
+    # every earlier row is bit-for-bit identical.
+    T, C, n_head = 8, 32, 4
+    s = float(1.0 / np.sqrt(C))
+    x = rng.standard_normal((T, C), dtype=np.float32)
+    w_qkv = rng.standard_normal((C, 3 * C), dtype=np.float32) * s
+    b_qkv = np.zeros(3 * C, dtype=np.float32)
+    w_proj = rng.standard_normal((C, C), dtype=np.float32) * s
+    b_proj = np.zeros(C, dtype=np.float32)
+    base = inferno_core.attention(x, w_qkv, b_qkv, w_proj, b_proj, n_head)
+    x2 = x.copy()
+    x2[-1] += 5.0
+    changed = inferno_core.attention(x2, w_qkv, b_qkv, w_proj, b_proj, n_head)
+    if not np.array_equal(base[:-1], changed[:-1]):
+        raise AssertionError("causal mask leak: earlier rows changed when a later token did")
+    if np.array_equal(base[-1], changed[-1]):
+        raise AssertionError("last row should have changed")
+
 def main():
     rng = np.random.default_rng(0)  # fixed seed: failures must be reproducible
     shapes = [(1, 1, 1), (2, 2, 2), (1, 7, 3), (5, 1, 5),
@@ -90,6 +149,20 @@ def main():
     check_softmax_stability()
     print(f"layernorm/softmax/gelu match torch on {len(op_shapes)} shapes "
           f"(+ softmax overflow guard)")
+
+    x = rng.standard_normal((5, 8), dtype=np.float32)
+    w = rng.standard_normal((8, 3), dtype=np.float32)
+    b = rng.standard_normal(3, dtype=np.float32)
+    if not np.allclose(inferno_core.linear(x, w, b), x @ w + b, rtol=RTOL, atol=ATOL):
+        raise AssertionError("linear mismatch")
+
+    attn_shapes = [(1, 16, 1), (1, 16, 4), (5, 32, 4), (16, 64, 8),
+                   (32, 768, 12), (64, 768, 12), (257, 768, 12)]
+    for T, C, n_head in attn_shapes:
+        check_attention(T, C, n_head, rng)
+    check_causality(rng)
+    print(f"attention matches torch on {len(attn_shapes)} shapes "
+          f"(incl. GPT-2 small: C=768, 12 heads) + causality check")
 
 if __name__ == "__main__":
     main()
