@@ -10,6 +10,7 @@ namespace inferno {
 // optimizations later in this project possible.
 class Tensor {
 public:
+    Tensor() = default;  // empty tensor: a slot to be filled by a loader
     explicit Tensor(std::vector<size_t> shape);
 
     // Element access for 2D tensors: t.at(row, col).
@@ -59,5 +60,12 @@ Tensor matmul_simd(const Tensor& a, const Tensor& b);
 //    A and all of B), so there is no shared write and no locking:
 //    embarrassingly parallel. n_threads = 0 means "one per core".
 Tensor matmul_threaded(const Tensor& a, const Tensor& b, size_t n_threads = 0);
+
+// C = A @ B^T for A (M,K) and B (N,K) -> (M,N). Every C[i][j] is a dot
+// product of row i of A with row j of B - both contiguous walks - so the
+// "naive" loop is already cache-friendly here, and the work vectorizes
+// as a horizontal dot product. Needed for the language-model head,
+// where logits = x @ wte^T and wte is stored (vocab, channels).
+Tensor matmul_bt(const Tensor& a, const Tensor& b, size_t n_threads = 0);
 
 } // namespace inferno

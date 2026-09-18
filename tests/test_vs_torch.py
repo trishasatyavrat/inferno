@@ -129,6 +129,65 @@ def check_causality(rng):
     if np.array_equal(base[-1], changed[-1]):
         raise AssertionError("last row should have changed")
 
+# ---- A reference GPT-2, written the long way -------------------------
+# Weights use the checkpoint's (in, out) layout so the same dict feeds
+# both this and inferno. Random init, small configs: this tests wiring,
+# not knowledge. Real weights come from the exporter later.
+
+def make_params(cfg, rng):
+    V, N, C, L = cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_layer"]
+    f32 = np.float32
+    p = {"wte": (rng.standard_normal((V, C)) * 0.02).astype(f32),
+         "wpe": (rng.standard_normal((N, C)) * 0.01).astype(f32),
+         "ln_f.g": (1 + rng.standard_normal(C) * 0.1).astype(f32),
+         "ln_f.b": (rng.standard_normal(C) * 0.1).astype(f32)}
+    for i in range(L):
+        h = f"h.{i}."
+        p[h + "ln_1.g"] = (1 + rng.standard_normal(C) * 0.1).astype(f32)
+        p[h + "ln_1.b"] = (rng.standard_normal(C) * 0.1).astype(f32)
+        p[h + "attn.c_attn.w"] = (rng.standard_normal((C, 3 * C)) * 0.02).astype(f32)
+        p[h + "attn.c_attn.b"] = (rng.standard_normal(3 * C) * 0.01).astype(f32)
+        p[h + "attn.c_proj.w"] = (rng.standard_normal((C, C)) * 0.02).astype(f32)
+        p[h + "attn.c_proj.b"] = (rng.standard_normal(C) * 0.01).astype(f32)
+        p[h + "ln_2.g"] = (1 + rng.standard_normal(C) * 0.1).astype(f32)
+        p[h + "ln_2.b"] = (rng.standard_normal(C) * 0.1).astype(f32)
+        p[h + "mlp.c_fc.w"] = (rng.standard_normal((C, 4 * C)) * 0.02).astype(f32)
+        p[h + "mlp.c_fc.b"] = (rng.standard_normal(4 * C) * 0.01).astype(f32)
+        p[h + "mlp.c_proj.w"] = (rng.standard_normal((4 * C, C)) * 0.02).astype(f32)
+        p[h + "mlp.c_proj.b"] = (rng.standard_normal(C) * 0.01).astype(f32)
+    return p
+
+def torch_gpt2(cfg, p, tokens):
+    t = {k: torch.from_numpy(v) for k, v in p.items()}
+    ln = lambda x, g, b: torch.nn.functional.layer_norm(x, (x.shape[-1],), g, b, eps=1e-5)
+    T = len(tokens)
+    x = t["wte"][tokens] + t["wpe"][:T]
+    for i in range(cfg["n_layer"]):
+        h = f"h.{i}."
+        a = torch_attention(ln(x, t[h + "ln_1.g"], t[h + "ln_1.b"]),
+                            t[h + "attn.c_attn.w"], t[h + "attn.c_attn.b"],
+                            t[h + "attn.c_proj.w"], t[h + "attn.c_proj.b"], cfg["n_head"])
+        x = x + a
+        m = ln(x, t[h + "ln_2.g"], t[h + "ln_2.b"]) @ t[h + "mlp.c_fc.w"] + t[h + "mlp.c_fc.b"]
+        m = torch.nn.functional.gelu(m, approximate="tanh") @ t[h + "mlp.c_proj.w"] + t[h + "mlp.c_proj.b"]
+        x = x + m
+    x = ln(x, t["ln_f.g"], t["ln_f.b"])
+    return (x @ t["wte"].T).numpy()
+
+def check_gpt2(cfg, p, tokens, rtol=2e-3, atol=2e-3):
+    model = inferno_core.GPT2(cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_head"],
+                              cfg["n_layer"], p)
+    ours = model.forward(tokens)
+    theirs = torch_gpt2(cfg, p, tokens)
+    if ours.shape != theirs.shape:
+        raise AssertionError(f"gpt2 logits shape {ours.shape} != {theirs.shape}")
+    if not np.allclose(ours, theirs, rtol=rtol, atol=atol):
+        raise AssertionError(f"gpt2 mismatch T={len(tokens)} cfg={cfg}: "
+                             f"max diff {np.abs(ours - theirs).max()}")
+    # The prediction that matters is the argmax; it must agree exactly.
+    if not np.array_equal(ours.argmax(-1), theirs.argmax(-1)):
+        raise AssertionError("gpt2 argmax disagrees")
+
 def main():
     rng = np.random.default_rng(0)  # fixed seed: failures must be reproducible
     shapes = [(1, 1, 1), (2, 2, 2), (1, 7, 3), (5, 1, 5),
@@ -163,6 +222,26 @@ def main():
     check_causality(rng)
     print(f"attention matches torch on {len(attn_shapes)} shapes "
           f"(incl. GPT-2 small: C=768, 12 heads) + causality check")
+
+    x = rng.standard_normal((6, 16), dtype=np.float32)
+    w1 = rng.standard_normal((16, 64), dtype=np.float32) * 0.25
+    b1 = rng.standard_normal(64, dtype=np.float32) * 0.1
+    w2 = rng.standard_normal((64, 16), dtype=np.float32) * 0.125
+    b2 = rng.standard_normal(16, dtype=np.float32) * 0.1
+    ref = torch.nn.functional.gelu(torch.from_numpy(x @ w1 + b1), approximate="tanh").numpy() @ w2 + b2
+    if not np.allclose(inferno_core.mlp(x, w1, b1, w2, b2), ref, rtol=1e-3, atol=1e-4):
+        raise AssertionError("mlp mismatch")
+
+    small = {"n_vocab": 100, "n_ctx": 16, "n_embd": 32, "n_head": 4, "n_layer": 2}
+    p_small = make_params(small, rng)
+    for T in (1, 5, 16):
+        check_gpt2(small, p_small, [int(v) for v in rng.integers(0, 100, size=T)])
+    # Full GPT-2 small shape at random init: 124M parameters, the real
+    # dimensions the loader will fill. Slow-ish (~1 s), worth it.
+    full = {"n_vocab": 50257, "n_ctx": 1024, "n_embd": 768, "n_head": 12, "n_layer": 12}
+    p_full = make_params(full, rng)
+    check_gpt2(full, p_full, [int(v) for v in rng.integers(0, 50257, size=8)])
+    print("gpt2 forward matches torch reference (2-layer toy at T=1/5/16; full 124M config at T=8)")
 
 if __name__ == "__main__":
     main()

@@ -52,4 +52,11 @@ Tensor linear(const Tensor& x, const Tensor& w, const Tensor& b);
 Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
                  const Tensor& w_proj, const Tensor& b_proj, size_t n_head);
 
+// The MLP (feed-forward) half of a transformer block:
+//   gelu(x @ w_fc + b_fc) @ w_proj + b_proj
+// w_fc is (C, 4C): GPT-2 expands to 3072 channels, applies GELU, and
+// projects back to 768. Two-thirds of the model's parameters live here.
+Tensor mlp(const Tensor& x, const Tensor& w_fc, const Tensor& b_fc,
+           const Tensor& w_proj, const Tensor& b_proj);
+
 } // namespace inferno

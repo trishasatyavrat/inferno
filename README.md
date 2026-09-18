@@ -12,10 +12,10 @@ understand exactly what runs when a language model generates a word.
 
 ## Status
 
-Early. Every operation GPT-2 needs - matmul, LayerNorm, softmax, GELU -
-is implemented and verified against PyTorch; matmul is optimized to
-~70x its naive baseline (SIMD + threads). Causal multi-head attention
-is built and verified at GPT-2's real dimensions. Next: the full block.
+The full GPT-2 forward pass runs and matches a PyTorch reference at the
+real 124M-parameter shape (random weights; the loader for the released
+checkpoint is next). matmul is optimized to ~70x its naive baseline
+(SIMD + threads). Next: load real weights and generate text.
 
 - [x] Tensor type (float32, row-major) + naive matmul + tests
 - [x] Python bindings (pybind11) + correctness harness vs PyTorch
@@ -25,7 +25,7 @@ is built and verified at GPT-2's real dimensions. Next: the full block.
       GPT-2 dimensions, including the 50257-wide vocabulary)
 - [x] Multithreading across output rows (rows of C split across cores)
 - [x] Causal multi-head attention (fused QKV, 12 heads, verified vs PyTorch)
-- [ ] MLP block + full transformer block + GPT-2 forward pass
+- [x] MLP block, transformer block, full GPT-2 forward pass (verified vs PyTorch at 124M config)
 - [ ] Load real GPT-2 weights → first generated text
 - [ ] End-to-end benchmark vs PyTorch CPU
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)
@@ -66,7 +66,9 @@ Python harness needs a venv with torch, numpy and pybind11.
 
 ## Layout
 
-- `src/` — the engine (`tensor.h/.cpp`, `bindings.cpp`)
+- `src/` — the engine: `tensor.h/.cpp` (container + matmul kernels),
+  `ops.h/.cpp` (LayerNorm, softmax, GELU, attention, MLP),
+  `model.h/.cpp` (GPT-2 wiring), `bindings.cpp` (Python bridge)
 - `tests/` — C++ assert tests + the Python/PyTorch fuzzing harness
 - `bench/` — benchmark harness reporting GFLOP/s per variant
 - `docs/LEARNING.md` — the running lab notebook: what each piece is,

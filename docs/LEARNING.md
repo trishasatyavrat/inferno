@@ -392,3 +392,87 @@ against a *causality* property test.
   way as our reference test
 - "Attention Is All You Need" §3.2.1 - the scaling argument, two
   paragraphs
+
+---
+
+## Day 7 (2026-09-18): The whole model - GPT-2 forward pass, verified
+
+**What we built:** `mlp()`, `transformer_block()`, and `gpt2_forward()`
+(`src/model.h/.cpp`), plus `matmul_bt` (A @ B^T) for the language-model
+head. `inferno_core.GPT2(config, params_dict).forward(tokens)` runs the
+entire network - embeddings, 12 blocks, final LayerNorm, logits - and
+matches a from-scratch PyTorch reference at random weights, both on a
+2-layer toy and on the real 124M-parameter GPT-2 small shape. The
+argmax (the predicted next token) agrees exactly.
+
+Every operation in the model now exists and is verified. What is left
+is *data* (real weights) and *speed* (generation).
+
+**The concepts:**
+
+- **The whole model in five lines.** `x = wte[tok] + wpe[pos]`; twelve
+  times `x = x + attn(ln1(x)); x = x + mlp(ln2(x))`; `x = lnf(x)`;
+  `logits = x @ wte^T`. That is GPT-2. Everything else in the repo is
+  making those lines fast or proving them right. Being able to write
+  this on a whiteboard from memory is the bar.
+
+- **Residual stream.** Every sublayer *adds* to x instead of replacing
+  it. Think of x as a running 768-channel "notebook" each block writes
+  into; information from the embedding can reach block 12 untouched.
+  Without this, stacking 12 blocks would not train (vanishing
+  gradients). It is also why `add()` is its own op: it is not glue, it
+  is the architecture.
+
+- **Pre-norm vs post-norm.** GPT-2 applies LayerNorm *before* attention
+  and MLP (pre-norm); the original 2017 Transformer applied it after.
+  Pre-norm trains more stably and is what every modern LLM uses. Get
+  the order wrong and the outputs are plausible-looking garbage that
+  only a reference comparison catches - which is exactly what the test
+  is for.
+
+- **Weight tying and why we needed a transposed matmul.** The output
+  head that scores all 50,257 tokens reuses the *input* embedding table
+  `wte` (50257 x 768). Reading it as (768 x 50257) would need a copy of
+  154 MB, so instead `matmul_bt` computes A @ B^T directly. And here is
+  the nice part: C[i][j] = dot(row i of A, row j of B) - *both* rows are
+  contiguous, so the "naive" loop is already cache-friendly. The
+  problem that made Day 3 hard (walking down columns) does not exist in
+  this shape. Layout decides everything.
+
+- **`matmul_bt` splits work differently at T=1.** During generation the
+  head is (1 x 768) @ (768 x 50257)^T: one row of output, 38M
+  multiply-adds. Splitting rows gives one thread everything, so for tiny
+  M it splits *columns* instead (each thread takes a slice of the
+  vocabulary). Same kernel, different partition; the test hits every
+  branch on purpose ({1, 768, 50257} is in the shape list).
+
+- **`Tensor() = default` was needed the moment a struct held tensors.**
+  A `GPT2Weights` with twelve blocks of named tensors has to be built
+  incrementally by a loader, which means empty slots must exist first.
+  A small C++ lesson: a class with no default constructor cannot be a
+  member of an aggregate you fill in later.
+
+- **Testing at the real size, again.** The 2-layer toy catches wiring
+  bugs fast; the 124M-config run catches anything that only appears at
+  768 channels, 12 heads, and a 50257-wide head (recall the Day 4
+  LayerNorm drift). It costs about a second. Tolerances are looser
+  (2e-3) because 12 blocks of float32 accumulate more rounding than one
+  op - but the argmax must still agree exactly, because that is what
+  the user sees.
+
+**Do now:**
+1. `make pytest` - watch the full-config check pass.
+2. Swap the order in `transformer_block` to post-norm (`ln1(x + attn(x))`)
+   and rerun: the toy test fails. That is the whole difference between
+   two architectures, in one line.
+3. On paper, count GPT-2 small's parameters from the shapes in
+   `model.h`. You should land near 124M; most of it is in the MLPs and
+   `wte`.
+
+**Resources:**
+- Karpathy's nanoGPT `model.py` - our `torch_gpt2` in the test is a
+  flattened version of it; read them side by side
+- "On Layer Normalization in the Transformer Architecture" (Xiong et
+  al. 2020) - the pre-norm paper, abstract + figure 1 is enough
+- Press & Wolf, "Using the Output Embedding to Improve Language Models"
+  - the weight-tying paper, one page of reading

@@ -66,6 +66,23 @@ int main() {
         }
     }
 
-    std::printf("all tensor tests passed (naive + 4 optimized variants agree)\n");
+    // matmul_bt(a, b) must equal matmul(a, transpose(b)). Shapes chosen to
+    // exercise every branch: row-split, column-split (tiny M, huge N), and
+    // the serial fallback.
+    const size_t bt_shapes[][3] = {{2,3,4}, {64,64,64}, {1,768,50257}, {3,768,2000}, {100,17,9}};
+    for (auto& s : bt_shapes) {
+        const size_t M = s[0], K = s[1], N = s[2];
+        Tensor x({M, K}), y({N, K}), yT({K, N});
+        for (size_t i = 0; i < x.size(); ++i) x.data()[i] = dist(gen);
+        for (size_t i = 0; i < N; ++i)
+            for (size_t k = 0; k < K; ++k) { float v = dist(gen); y.at(i, k) = v; yT.at(k, i) = v; }
+        Tensor ref = inferno::matmul_reordered(x, yT);
+        Tensor got = inferno::matmul_bt(x, y);
+        assert(got.shape()[0] == M && got.shape()[1] == N);
+        for (size_t i = 0; i < ref.size(); ++i)
+            assert(std::fabs(ref.data()[i] - got.data()[i]) < 1e-2f);
+    }
+
+    std::printf("all tensor tests passed (naive + 4 optimized variants agree; matmul_bt ok)\n");
     return 0;
 }

@@ -8,6 +8,8 @@
 #include <pybind11/numpy.h>
 #include "tensor.h"
 #include "ops.h"
+#include "model.h"
+#include <pybind11/stl.h>
 
 namespace py = pybind11;
 using inferno::Tensor;
@@ -72,6 +74,51 @@ static py::array_t<float> py_attention(Arr x, Arr w_qkv, Arr b_qkv, Arr w_proj, 
                                        from_numpy(w_proj), from_numpy_1d(b_proj), n_head));
 }
 
+static py::array_t<float> py_mlp(Arr x, Arr w_fc, Arr b_fc, Arr w_proj, Arr b_proj) {
+    return to_numpy(inferno::mlp(from_numpy(x), from_numpy(w_fc), from_numpy_1d(b_fc),
+                                 from_numpy(w_proj), from_numpy_1d(b_proj)));
+}
+
+// The whole model, built from a dict of numpy arrays keyed the way the
+// released checkpoint names them (wte, wpe, h.0.ln_1.g, ...). This is
+// the same structure the on-disk loader will fill in later; here Python
+// fills it so the forward pass can be tested against PyTorch at random
+// weights before any real checkpoint exists.
+struct PyGPT2 {
+    inferno::GPT2Weights w;
+
+    PyGPT2(size_t n_vocab, size_t n_ctx, size_t n_embd, size_t n_head, size_t n_layer,
+           const py::dict& params) {
+        w.cfg = {n_vocab, n_ctx, n_embd, n_head, n_layer};
+        auto get = [&](const std::string& key) -> Tensor {
+            if (!params.contains(key.c_str()))
+                throw std::invalid_argument("missing weight: " + key);
+            Arr a = params[key.c_str()].cast<Arr>();
+            return a.ndim() == 1 ? from_numpy_1d(a) : from_numpy(a);
+        };
+        w.wte = get("wte");
+        w.wpe = get("wpe");
+        for (size_t i = 0; i < n_layer; ++i) {
+            const std::string p = "h." + std::to_string(i) + ".";
+            inferno::BlockWeights b{
+                get(p + "ln_1.g"), get(p + "ln_1.b"),
+                get(p + "attn.c_attn.w"), get(p + "attn.c_attn.b"),
+                get(p + "attn.c_proj.w"), get(p + "attn.c_proj.b"),
+                get(p + "ln_2.g"), get(p + "ln_2.b"),
+                get(p + "mlp.c_fc.w"), get(p + "mlp.c_fc.b"),
+                get(p + "mlp.c_proj.w"), get(p + "mlp.c_proj.b"),
+            };
+            w.blocks.push_back(std::move(b));
+        }
+        w.lnf_g = get("ln_f.g");
+        w.lnf_b = get("ln_f.b");
+    }
+
+    py::array_t<float> forward(const std::vector<int>& tokens) {
+        return to_numpy(inferno::gpt2_forward(w, tokens));
+    }
+};
+
 PYBIND11_MODULE(inferno_core, m) {
     m.doc() = "inferno: hand-built tensor ops, exposed to Python";
     m.def("matmul", &py_matmul, "C = A @ B, computed by inferno's C++ engine");
@@ -83,4 +130,11 @@ PYBIND11_MODULE(inferno_core, m) {
     m.def("attention", &py_attention, "causal multi-head self-attention, GPT-2 layout",
           py::arg("x"), py::arg("w_qkv"), py::arg("b_qkv"), py::arg("w_proj"), py::arg("b_proj"),
           py::arg("n_head"));
+    m.def("mlp", &py_mlp, "gelu(x @ w_fc + b_fc) @ w_proj + b_proj");
+
+    py::class_<PyGPT2>(m, "GPT2")
+        .def(py::init<size_t, size_t, size_t, size_t, size_t, const py::dict&>(),
+             py::arg("n_vocab"), py::arg("n_ctx"), py::arg("n_embd"), py::arg("n_head"),
+             py::arg("n_layer"), py::arg("params"))
+        .def("forward", &PyGPT2::forward, "token ids -> logits (T, n_vocab)");
 }

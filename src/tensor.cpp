@@ -225,4 +225,81 @@ Tensor matmul_threaded(const Tensor& a, const Tensor& b, size_t n_threads) {
     return c;
 }
 
+// Rows [i0, i1) of C = A @ B^T. Each output is a dot product of two
+// contiguous K-long rows, accumulated in four NEON lanes and reduced at
+// the end - the same "keep the accumulator in registers" idea as
+// simd_rows, applied to a reduction instead of a strip of C.
+static void bt_rows(const float* A, const float* B, float* C,
+                    size_t K, size_t N, size_t i0, size_t i1) {
+    for (size_t i = i0; i < i1; ++i) {
+        const float* a_row = A + i * K;
+        for (size_t j = 0; j < N; ++j) {
+            const float* b_row = B + j * K;
+            size_t k = 0;
+            float acc = 0.0f;
+#if defined(__ARM_NEON)
+            float32x4_t v0 = vdupq_n_f32(0.0f), v1 = vdupq_n_f32(0.0f);
+            for (; k + 8 <= K; k += 8) {
+                v0 = vfmaq_f32(v0, vld1q_f32(a_row + k),     vld1q_f32(b_row + k));
+                v1 = vfmaq_f32(v1, vld1q_f32(a_row + k + 4), vld1q_f32(b_row + k + 4));
+            }
+            acc = vaddvq_f32(vaddq_f32(v0, v1));
+#endif
+            for (; k < K; ++k) acc += a_row[k] * b_row[k];
+            C[i * N + j] = acc;
+        }
+    }
+}
+
+Tensor matmul_bt(const Tensor& a, const Tensor& b, size_t n_threads) {
+    if (a.shape().size() != 2 || b.shape().size() != 2)
+        throw std::invalid_argument("matmul_bt: 2D tensors only");
+    if (a.shape()[1] != b.shape()[1])
+        throw std::invalid_argument("matmul_bt: inner dimensions must match (A is (M,K), B is (N,K))");
+    const size_t M = a.shape()[0], K = a.shape()[1], N = b.shape()[0];
+    Tensor c({M, N});
+
+    if (n_threads == 0) n_threads = std::thread::hardware_concurrency();
+    if (n_threads == 0) n_threads = 1;
+    // Work per row is N*K; split rows when there is enough of it to be
+    // worth a thread. The LM head is (T x 768) @ (768 x 50257)^T: at
+    // T=1 that is a single row of 38M multiply-adds, so for tiny M we
+    // split over columns of C (rows of B) instead.
+    const float* A = a.data();
+    const float* B = b.data();
+    float* C = c.data();
+    if (M >= n_threads * 4) {
+        const size_t rows_per = (M + n_threads - 1) / n_threads;
+        std::vector<std::thread> pool;
+        for (size_t t = 0; t < n_threads; ++t) {
+            const size_t i0 = t * rows_per, i1 = std::min(M, i0 + rows_per);
+            if (i0 >= i1) break;
+            pool.emplace_back(bt_rows, A, B, C, K, N, i0, i1);
+        }
+        for (auto& th : pool) th.join();
+    } else if (static_cast<double>(M) * N * K >= 1e6 && N >= n_threads) {
+        // Column split: thread t computes C[:, j0:j1] by treating the
+        // corresponding rows of B as its own smaller B.
+        const size_t cols_per = (N + n_threads - 1) / n_threads;
+        std::vector<std::thread> pool;
+        for (size_t t = 0; t < n_threads; ++t) {
+            const size_t j0 = t * cols_per, j1 = std::min(N, j0 + cols_per);
+            if (j0 >= j1) break;
+            pool.emplace_back([=] {
+                for (size_t i = 0; i < M; ++i) {
+                    // Reuse bt_rows on a one-row A against B[j0:j1],
+                    // writing into a temporary then copying into place.
+                    std::vector<float> tmp(j1 - j0);
+                    bt_rows(A + i * K, B + j0 * K, tmp.data(), K, j1 - j0, 0, 1);
+                    std::copy(tmp.begin(), tmp.end(), C + i * N + j0);
+                }
+            });
+        }
+        for (auto& th : pool) th.join();
+    } else {
+        bt_rows(A, B, C, K, N, 0, M);
+    }
+    return c;
+}
+
 } // namespace inferno

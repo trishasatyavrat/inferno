@@ -185,4 +185,9 @@ Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
     return linear(concat, w_proj, b_proj);
 }
 
+Tensor mlp(const Tensor& x, const Tensor& w_fc, const Tensor& b_fc,
+           const Tensor& w_proj, const Tensor& b_proj) {
+    return linear(gelu(linear(x, w_fc, b_fc)), w_proj, b_proj);
+}
+
 } // namespace inferno
