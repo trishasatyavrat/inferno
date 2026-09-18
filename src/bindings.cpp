@@ -9,6 +9,7 @@
 #include "tensor.h"
 #include "ops.h"
 #include "model.h"
+#include "checkpoint.h"
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
@@ -114,6 +115,10 @@ struct PyGPT2 {
         w.lnf_b = get("ln_f.b");
     }
 
+    explicit PyGPT2(const std::string& path) : w(inferno::load_checkpoint(path)) {}
+
+    size_t n_params() const { return inferno::param_count(w); }
+
     py::array_t<float> forward(const std::vector<int>& tokens) {
         return to_numpy(inferno::gpt2_forward(w, tokens));
     }
@@ -136,5 +141,8 @@ PYBIND11_MODULE(inferno_core, m) {
         .def(py::init<size_t, size_t, size_t, size_t, size_t, const py::dict&>(),
              py::arg("n_vocab"), py::arg("n_ctx"), py::arg("n_embd"), py::arg("n_head"),
              py::arg("n_layer"), py::arg("params"))
+        .def(py::init<const std::string&>(), py::arg("path"),
+             "load an INFR checkpoint written by tools/export_gpt2.py")
+        .def("n_params", &PyGPT2::n_params)
         .def("forward", &PyGPT2::forward, "token ids -> logits (T, n_vocab)");
 }

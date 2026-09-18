@@ -476,3 +476,86 @@ is *data* (real weights) and *speed* (generation).
   al. 2020) - the pre-norm paper, abstract + figure 1 is enough
 - Press & Wolf, "Using the Output Embedding to Improve Language Models"
   - the weight-tying paper, one page of reading
+
+---
+
+## Day 8 (2026-09-18): A file format, a loader, and a binary
+
+**What we built:** `src/checkpoint.h/.cpp` - inferno's own weight file
+format ("INFR" v1) and the C++ loader for it; `tools/export_gpt2.py` -
+downloads the released GPT-2 small checkpoint from the Hugging Face Hub
+and rewrites it in that format (`make weights`); and `src/main.cpp` -
+the `inferno` command-line binary that loads a file, runs the forward
+pass, and prints the top-5 next tokens (`make inferno`). The Python
+class gained `GPT2(path)` and the harness round-trips a toy model
+through the file: loader output is bit-for-bit equal to the dict-built
+model.
+
+**Not done today, on purpose:** the actual 548 MB download. It is one
+command (`uv pip install huggingface_hub safetensors && make weights`),
+but pulling half a gigabyte is a decision to make with eyes open, not
+something a build script does silently. Everything up to that line is
+tested without it.
+
+**The concepts:**
+
+- **Why invent a format instead of reading safetensors in C++?** Two
+  reasons. First, zero dependencies on the C++ side: the loader is 100
+  lines of `ifstream::read`, and the binary has no library to link.
+  Second, understanding: writing a format forces you to answer what a
+  weight file *is* - a header saying the shape of the model, then named
+  tensors, each with its dimensions and a flat run of float32. That is
+  all safetensors or GGUF are, with more engineering (alignment,
+  mmap-ability, dtype variety). Ours is the minimum that is still
+  *self-describing*.
+
+- **Self-describing beats positional.** Tensors could have been dumped
+  in a fixed order with no names, saving a few bytes. Instead each
+  carries its name and shape, and the loader checks both against what
+  the config implies (`take(tensors, "h.3.mlp.c_fc.w", {768, 3072})`).
+  A wrong file now says *which* tensor is wrong and *how*. Silent
+  misloads - reading the MLP weights into the attention slot - would
+  produce plausible garbage that only a reference test catches, and
+  there is no reference once the weights are real.
+
+- **The rename that is not a transpose.** Hugging Face stores GPT-2's
+  linear layers as `Conv1D` with weight shape (in, out) - a historical
+  quirk of the original TensorFlow release. PyTorch's `nn.Linear` is
+  (out, in). Because inferno adopted (in, out) on Day 6, the exporter
+  is a pure rename: `attn.c_attn.weight` -> `attn.c_attn.w`, bytes
+  untouched. Choosing the weight layout early, to match the data you
+  will actually load, is what made this day short.
+
+- **What gets dropped.** `h.N.attn.bias` in the checkpoint is not a
+  bias; it is the causal-mask buffer (a triangle of ones) that the HF
+  implementation stores as a tensor. `lm_head.weight` is the same
+  memory as `wte.weight` (tied). Neither is a parameter and the
+  exporter skips both. Knowing what is in a checkpoint and why is part
+  of knowing the model.
+
+- **One `read()` per tensor.** The loader reads each tensor's bytes
+  straight into the `Tensor`'s storage: no element loop, no temporary.
+  500 MB arrives at disk speed. This works *because* the tensor is one
+  contiguous float array - the Day 1 decision, again.
+
+- **The binary has an error path.** A missing or malformed file prints
+  a specific message and exits 1; a good file prints load time, layer
+  count, and parameter count before doing anything else. Tools that
+  tell you what they loaded are tools you can trust when the output
+  looks wrong.
+
+**Do now:**
+1. `make pytest` (round-trip) and `make inferno`, then run it on a toy
+   file: `.venv/bin/python -c` the snippet from the test to write one.
+2. Open a toy `.bin` in `xxd | head` and find the magic, the version,
+   the config, and the first tensor name.
+3. When ready for real weights:
+   `uv pip install huggingface_hub safetensors && make weights`, then
+   `./build/inferno weights/gpt2.bin 464 3290 318` (that is "The
+   capital of"). Token 1578 ("France") should not be far from the top.
+
+**Resources:**
+- safetensors format spec (one page) - compare header design to ours
+- GGUF spec (llama.cpp) - the same idea, production-grade
+- Hugging Face `modeling_gpt2.py`, the `Conv1D` class docstring - why
+  the weights are (in, out)

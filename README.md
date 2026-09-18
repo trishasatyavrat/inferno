@@ -13,9 +13,10 @@ understand exactly what runs when a language model generates a word.
 ## Status
 
 The full GPT-2 forward pass runs and matches a PyTorch reference at the
-real 124M-parameter shape (random weights; the loader for the released
-checkpoint is next). matmul is optimized to ~70x its naive baseline
-(SIMD + threads). Next: load real weights and generate text.
+real 124M-parameter shape, and the released checkpoint can be exported
+into inferno's own weight format and loaded by the C++ binary. matmul is
+optimized to ~70x its naive baseline (SIMD + threads). Next: the
+generation loop and a tokenizer.
 
 - [x] Tensor type (float32, row-major) + naive matmul + tests
 - [x] Python bindings (pybind11) + correctness harness vs PyTorch
@@ -26,7 +27,8 @@ checkpoint is next). matmul is optimized to ~70x its naive baseline
 - [x] Multithreading across output rows (rows of C split across cores)
 - [x] Causal multi-head attention (fused QKV, 12 heads, verified vs PyTorch)
 - [x] MLP block, transformer block, full GPT-2 forward pass (verified vs PyTorch at 124M config)
-- [ ] Load real GPT-2 weights → first generated text
+- [x] Weight file format + loader + exporter from the released checkpoint
+- [ ] Generation loop + tokenizer → first generated text
 - [ ] End-to-end benchmark vs PyTorch CPU
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)
 
@@ -56,9 +58,11 @@ of B). Details in [docs/LEARNING.md](docs/LEARNING.md).
 ## Build & test
 
 ```bash
-make test    # correctness: all four matmul variants must agree
-make bench   # performance: GFLOP/s per variant
-make pytest  # fuzzing harness against PyTorch (needs .venv)
+make test     # correctness: all matmul variants must agree
+make bench    # performance: GFLOP/s per variant
+make pytest   # harness against PyTorch: every op + the full model (needs .venv)
+make weights  # one-time: download GPT-2 small (548 MB) -> weights/gpt2.bin
+make inferno  # the CLI: ./build/inferno weights/gpt2.bin <token ids...>
 ```
 
 Requires a C++17 compiler (clang on macOS works out of the box). The
@@ -68,7 +72,9 @@ Python harness needs a venv with torch, numpy and pybind11.
 
 - `src/` — the engine: `tensor.h/.cpp` (container + matmul kernels),
   `ops.h/.cpp` (LayerNorm, softmax, GELU, attention, MLP),
-  `model.h/.cpp` (GPT-2 wiring), `bindings.cpp` (Python bridge)
+  `model.h/.cpp` (GPT-2 wiring), `checkpoint.h/.cpp` (weight file
+  format + loader), `main.cpp` (CLI), `bindings.cpp` (Python bridge)
+- `tools/export_gpt2.py` — Hugging Face checkpoint -> `weights/gpt2.bin`
 - `tests/` — C++ assert tests + the Python/PyTorch fuzzing harness
 - `bench/` — benchmark harness reporting GFLOP/s per variant
 - `docs/LEARNING.md` — the running lab notebook: what each piece is,

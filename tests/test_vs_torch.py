@@ -243,5 +243,26 @@ def main():
     check_gpt2(full, p_full, [int(v) for v in rng.integers(0, 50257, size=8)])
     print("gpt2 forward matches torch reference (2-layer toy at T=1/5/16; full 124M config at T=8)")
 
+    # Checkpoint round-trip: write the toy params with the exporter's
+    # writer, load them through the C++ loader, and the logits must be
+    # bit-for-bit identical to the dict-built model - same weights, same
+    # code, so any difference would mean the file format lost something.
+    import tempfile
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+    from export_gpt2 import write_inferno
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "toy.bin")
+        write_inferno(path, small, p_small)
+        loaded = inferno_core.GPT2(path)
+        built = inferno_core.GPT2(small["n_vocab"], small["n_ctx"], small["n_embd"],
+                                  small["n_head"], small["n_layer"], p_small)
+        toks = [3, 1, 4, 1, 5, 9, 2, 6]
+        if not np.array_equal(loaded.forward(toks), built.forward(toks)):
+            raise AssertionError("checkpoint round-trip changed the logits")
+        expected = sum(v.size for v in p_small.values())
+        if loaded.n_params() != expected:
+            raise AssertionError(f"n_params {loaded.n_params()} != {expected}")
+    print("checkpoint round-trip: loader reproduces dict-built model bit-for-bit")
+
 if __name__ == "__main__":
     main()
