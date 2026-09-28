@@ -44,7 +44,7 @@ int main() {
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     const size_t shapes[][3] = {{1,1,1}, {3,5,2}, {16,16,16},
                                 {64,64,64}, {65,33,17}, {128,96,64},
-                                {200,64,32}, {1,768,768}};
+                                {200,64,32}, {1,768,768}, {1,768,3072}, {2,768,2304}, {5,64,1000}};
     for (auto& s : shapes) {
         Tensor x({s[0], s[1]}), y({s[1], s[2]});
         for (size_t i = 0; i < x.size(); ++i) x.data()[i] = dist(gen);

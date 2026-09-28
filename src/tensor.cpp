@@ -130,8 +130,8 @@ Tensor matmul_blocked(const Tensor& a, const Tensor& b, size_t block) {
 // The SIMD kernel over a row range [i0, i1) of C. Pulled out of
 // matmul_simd so the threaded version can hand each thread its own
 // slice of rows and reuse the exact same inner loop.
-static void simd_rows(const float* A, const float* B, float* C,
-                      size_t K, size_t N, size_t i0, size_t i1) {
+static void simd_tile(const float* A, const float* B, float* C,
+                      size_t K, size_t N, size_t i0, size_t i1, size_t j0, size_t j1) {
 #if defined(__ARM_NEON)
     // Register blocking: hold a 1x16 strip of C in four NEON registers
     // across the ENTIRE k loop, so C is loaded and stored once per strip
@@ -141,8 +141,8 @@ static void simd_rows(const float* A, const float* B, float* C,
     for (size_t i = i0; i < i1; ++i) {
         const float* a_row = A + i * K;
         float* c_row = C + i * N;
-        size_t j = 0;
-        for (; j + 16 <= N; j += 16) {
+        size_t j = j0;
+        for (; j + 16 <= j1; j += 16) {
             float32x4_t c0 = vld1q_f32(c_row + j);
             float32x4_t c1 = vld1q_f32(c_row + j + 4);
             float32x4_t c2 = vld1q_f32(c_row + j + 8);
@@ -161,7 +161,7 @@ static void simd_rows(const float* A, const float* B, float* C,
             vst1q_f32(c_row + j + 12, c3);
         }
         // Scalar remainder for the tail columns.
-        for (; j < N; ++j) {
+        for (; j < j1; ++j) {
             float acc = c_row[j];
             for (size_t k = 0; k < K; ++k)
                 acc += a_row[k] * B[k * N + j];
@@ -169,16 +169,21 @@ static void simd_rows(const float* A, const float* B, float* C,
         }
     }
 #else
-    // Portable fallback: the reordered loop over the same row range.
+    // Portable fallback: the reordered loop over the same tile.
     for (size_t i = i0; i < i1; ++i) {
         float* c_row = C + i * N;
         for (size_t k = 0; k < K; ++k) {
             const float a_ik = A[i * K + k];
             const float* b_row = B + k * N;
-            for (size_t j = 0; j < N; ++j) c_row[j] += a_ik * b_row[j];
+            for (size_t j = j0; j < j1; ++j) c_row[j] += a_ik * b_row[j];
         }
     }
 #endif
+}
+
+static void simd_rows(const float* A, const float* B, float* C,
+                      size_t K, size_t N, size_t i0, size_t i1) {
+    simd_tile(A, B, C, K, N, i0, i1, 0, N);
 }
 
 Tensor matmul_simd(const Tensor& a, const Tensor& b) {
@@ -196,19 +201,39 @@ Tensor matmul_threaded(const Tensor& a, const Tensor& b, size_t n_threads) {
 
     if (n_threads == 0) n_threads = std::thread::hardware_concurrency();
     if (n_threads == 0) n_threads = 1;
+    const float* A = a.data();
+    const float* B = b.data();
+    float* C = c.data();
+
     // Spawning a thread costs tens of microseconds. For small matrices
     // that overhead exceeds the work, so give each thread a meaningful
     // chunk: at least 16 rows, and never more threads than rows.
     const size_t min_rows_per_thread = 16;
-    n_threads = std::min(n_threads, std::max<size_t>(1, M / min_rows_per_thread));
-    if (n_threads <= 1) {
-        simd_rows(a.data(), b.data(), c.data(), K, N, 0, M);
+    const size_t row_threads = std::min(n_threads, std::max<size_t>(1, M / min_rows_per_thread));
+
+    if (row_threads <= 1) {
+        // Too few rows to split (M=1 during decode: every weight matrix
+        // is read once for a single output row). Split the COLUMNS
+        // instead: thread t computes C[:, j0:j1], reading only its
+        // slice of every row of B. The work is memory-bound - streaming
+        // the weights - so the point is to have several cores pulling
+        // from memory at once. Strips are multiples of 16 so each
+        // thread's inner loop stays on the NEON fast path.
+        const size_t min_work = 1u << 18;  // ~256K MACs before threads pay off
+        const size_t col_threads = std::min(n_threads, std::max<size_t>(1, (M * K * N) / min_work));
+        if (col_threads <= 1 || N < 32) {
+            simd_rows(A, B, C, K, N, 0, M);
+            return c;
+        }
+        const size_t strip = ((N + col_threads - 1) / col_threads + 15) / 16 * 16;
+        std::vector<std::thread> pool;
+        for (size_t j0 = 0; j0 < N; j0 += strip)
+            pool.emplace_back(simd_tile, A, B, C, K, N, size_t{0}, M, j0, std::min(N, j0 + strip));
+        for (auto& th : pool) th.join();
         return c;
     }
 
-    const float* A = a.data();
-    const float* B = b.data();
-    float* C = c.data();
+    n_threads = row_threads;
     const size_t rows_per = (M + n_threads - 1) / n_threads;
 
     std::vector<std::thread> pool;

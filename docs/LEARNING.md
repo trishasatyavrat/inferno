@@ -807,3 +807,60 @@ in the README as written.
   structure, production-grade
 - Apple Accelerate BLAS docs - what 1 TFLOP/s of tuned kernels looks
   like from the outside
+
+---
+
+## Day 12 (2026-09-28): Threading the decode step - and hitting spawn overhead
+
+**What we built:** `matmul_threaded` now splits *columns* when there
+are too few rows to split (M=1 during decode). The NEON kernel became
+`simd_tile(A, B, C, K, N, i0, i1, j0, j1)` - a row range *and* a column
+range - and both partitions call it. New test shapes cover the column
+path at real decode sizes.
+
+**Measured:**
+
+| | before | after |
+|---|---|---|
+| (1 x 768) @ (768 x 3072) | 25.9 GFLOP/s | 38.7 GFLOP/s |
+| decode step, 64-token cache | 20.2 ms | 15.6 ms |
+| generate 32 tokens (KV cache) | 40.5 tok/s | 53.6 tok/s |
+
+**The concepts:**
+
+- **Why columns.** With one output row there is nothing to divide by
+  row. But every thread can own a strip of columns: thread t computes
+  C[0, j0:j1], reading only its slice of each row of B. The work is
+  memory-bound (streaming 496 MB of weights per token), so the goal is
+  several cores pulling from memory simultaneously. Strips are
+  multiples of 16 so each thread's inner loop stays on the register-
+  blocked NEON path with no partial strips.
+
+- **Only 1.45x, not 4x - and why.** A decode step makes about 60
+  matmul calls (12 layers x 5 each), and every call spawns 11 threads
+  and joins them. Thread creation is tens of microseconds; the matmul
+  itself is ~100 us at these sizes. Spawn cost is now a large fraction
+  of each call. Day 5 predicted this: "real libraries keep a persistent
+  thread pool." That is the next change - spawn once, hand out work,
+  wait on a barrier - and it is worth an estimated further 1.5-2x on
+  decode. Column splitting was still the right first move: it changed
+  the *shape* of the parallelism; the pool changes its *cost*.
+
+- **The threshold matters.** Splitting columns for tiny matmuls
+  (attention's per-head (1 x 64) @ (64 x L) at short L) would be pure
+  overhead, so the column path only engages above ~256K
+  multiply-adds. Every threading decision in this file is now a
+  measured threshold, not a guess.
+
+**Do now:**
+1. `make bench` - compare the T=1 rows to Day 5.
+2. Count the matmul calls in one decode step from `model.cpp` and
+   `ops.cpp`. Multiply by the number of threads. That is how many
+   thread spawns one token costs today.
+3. Sketch the thread pool: what does a worker wait on, and how does
+   the caller know all strips are done?
+
+**Resources:**
+- "C++ Concurrency in Action" (Williams), ch. 9 - thread pools
+- Any write-up on `std::barrier` / `std::latch` (C++20) - the
+  synchronization the pool needs

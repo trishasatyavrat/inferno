@@ -35,7 +35,8 @@ forward pass. Next: thread the single-row matmuls that dominate decode.
 - [x] Byte-level BPE tokenizer in C++ (hand-checked merges, exact round trip, tiktoken cross-check)
 - [x] KV cache: 9.7x over full recompute (prefill + one row per token)
 - [x] End-to-end benchmark vs PyTorch CPU (`make bench-e2e`)
-- [ ] Column-split threading for T=1 matmuls (decode is at 25 GB/s; the memory floor is several times higher)
+- [x] Column-split threading for T=1 matmuls (decode 20 -> 15.6 ms/token)
+- [ ] Persistent thread pool (spawn cost now dominates the ~60 matmul calls per token)
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)
 
 ## Benchmarks
@@ -56,13 +57,13 @@ End to end on the full 124M model (`make bench-e2e`, torch 2.13 CPU):
 |---|---|---|
 | forward pass, 64 tokens | 358 ms | 35 ms |
 | generate 32 tokens, full recompute | 4.2 tok/s | 39.9 tok/s |
-| generate 32 tokens, KV cache | 40.5 tok/s | (torch loop above has no cache) |
+| generate 32 tokens, KV cache | 53.6 tok/s | (torch loop above has no cache) |
 
 Read that honestly: the KV cache is a 9.7x win over our own baseline,
 and our cached loop ties PyTorch's *uncached* loop, but PyTorch's
 BLAS-backed forward pass is 10x faster than ours. The gap is memory
 traffic around the matmuls (per-head copies, allocations) and
-single-threaded T=1 matmuls during decode - both are the next targets.
+per-call thread spawning during decode - both are the next targets.
 
 Two results from the matmul work worth stating plainly: cache blocking came in *below* the
 plain loop reorder at these sizes (the matrices largely fit in cache
