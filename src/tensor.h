@@ -59,6 +59,8 @@ Tensor matmul_simd(const Tensor& a, const Tensor& b);
 //    threads. Rows are independent (row i of C depends only on row i of
 //    A and all of B), so there is no shared write and no locking:
 //    embarrassingly parallel. n_threads = 0 means "one per core".
+//    Threads come from the persistent pool in pool.h (Day 13); before
+//    that every call spawned and joined its own.
 Tensor matmul_threaded(const Tensor& a, const Tensor& b, size_t n_threads = 0);
 
 // C = A @ B^T for A (M,K) and B (N,K) -> (M,N). Every C[i][j] is a dot

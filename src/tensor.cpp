@@ -1,4 +1,5 @@
 #include "tensor.h"
+#include "pool.h"
 #include <cassert>
 #include <numeric>
 #include <algorithm>
@@ -6,7 +7,6 @@
 #include <arm_neon.h>
 #endif
 #include <stdexcept>
-#include <thread>
 
 namespace inferno {
 
@@ -199,54 +199,58 @@ Tensor matmul_threaded(const Tensor& a, const Tensor& b, size_t n_threads) {
     const size_t M = a.shape()[0], K = a.shape()[1], N = b.shape()[1];
     Tensor c({M, N});
 
-    if (n_threads == 0) n_threads = std::thread::hardware_concurrency();
-    if (n_threads == 0) n_threads = 1;
+    if (n_threads == 0) n_threads = pool_threads();
     const float* A = a.data();
     const float* B = b.data();
     float* C = c.data();
 
-    // Spawning a thread costs tens of microseconds. For small matrices
-    // that overhead exceeds the work, so give each thread a meaningful
-    // chunk: at least 16 rows, and never more threads than rows.
-    const size_t min_rows_per_thread = 16;
-    const size_t row_threads = std::min(n_threads, std::max<size_t>(1, M / min_rows_per_thread));
+    // Threads come from the persistent pool (pool.h), so the per-call
+    // cost is a wake-up, not a spawn. The chunking rules below were set
+    // when each chunk cost a thread spawn; they still hold - too-small
+    // chunks lose to cache effects and wake-up latency - but are now
+    // candidates for re-tuning (see LEARNING.md, Day 13).
+    // Oversubscribe: hand out ~4 chunks per thread rather than one. The
+    // pool's atomic counter then load-balances - a thread that lands on
+    // a slow (efficiency) core takes fewer chunks, a fast one takes
+    // more, and the job no longer waits for its slowest fixed slice.
+    // With one chunk per thread (the spawn-era rule) the N=1024 square
+    // case fell from 106 to 34 GFLOP/s the moment workers persisted.
+    const size_t oversub = 4;
+    const size_t min_rows_per_chunk = 16;
+    const size_t row_chunks = std::min(n_threads * oversub, std::max<size_t>(1, M / min_rows_per_chunk));
 
-    if (row_threads <= 1) {
+    if (row_chunks <= 1) {
         // Too few rows to split (M=1 during decode: every weight matrix
         // is read once for a single output row). Split the COLUMNS
-        // instead: thread t computes C[:, j0:j1], reading only its
-        // slice of every row of B. The work is memory-bound - streaming
-        // the weights - so the point is to have several cores pulling
-        // from memory at once. Strips are multiples of 16 so each
-        // thread's inner loop stays on the NEON fast path.
+        // instead: task t computes C[:, j0:j1], reading only its slice
+        // of every row of B. The work is memory-bound - streaming the
+        // weights - so the point is to have several cores pulling from
+        // memory at once. Strips are multiples of 16 so each task's
+        // inner loop stays on the NEON fast path.
         const size_t min_work = 1u << 18;  // ~256K MACs before threads pay off
-        const size_t col_threads = std::min(n_threads, std::max<size_t>(1, (M * K * N) / min_work));
-        if (col_threads <= 1 || N < 32) {
+        const size_t col_chunks = std::min(n_threads * oversub, std::max<size_t>(1, (M * K * N) / min_work));
+        if (col_chunks <= 1 || N < 32) {
             simd_rows(A, B, C, K, N, 0, M);
             return c;
         }
-        const size_t strip = ((N + col_threads - 1) / col_threads + 15) / 16 * 16;
-        std::vector<std::thread> pool;
-        for (size_t j0 = 0; j0 < N; j0 += strip)
-            pool.emplace_back(simd_tile, A, B, C, K, N, size_t{0}, M, j0, std::min(N, j0 + strip));
-        for (auto& th : pool) th.join();
+        const size_t strip = ((N + col_chunks - 1) / col_chunks + 15) / 16 * 16;
+        const size_t n_strips = (N + strip - 1) / strip;
+        parallel_for(n_strips, [&](size_t t) {
+            const size_t j0 = t * strip;
+            simd_tile(A, B, C, K, N, 0, M, j0, std::min(N, j0 + strip));
+        });
         return c;
     }
 
-    n_threads = row_threads;
-    const size_t rows_per = (M + n_threads - 1) / n_threads;
-
-    std::vector<std::thread> pool;
-    pool.reserve(n_threads);
-    for (size_t t = 0; t < n_threads; ++t) {
+    const size_t rows_per = (M + row_chunks - 1) / row_chunks;
+    const size_t n_chunks = (M + rows_per - 1) / rows_per;
+    // Each task writes only rows [i0, i1) of C. A and B are read by
+    // everyone, which is safe: concurrent reads need no lock.
+    parallel_for(n_chunks, [&](size_t t) {
         const size_t i0 = t * rows_per;
         const size_t i1 = std::min(M, i0 + rows_per);
-        if (i0 >= i1) break;
-        // Each thread writes only rows [i0, i1) of C. A and B are read
-        // by everyone, which is safe: concurrent reads need no lock.
-        pool.emplace_back(simd_rows, A, B, C, K, N, i0, i1);
-    }
-    for (auto& th : pool) th.join();
+        simd_rows(A, B, C, K, N, i0, i1);
+    });
     return c;
 }
 
@@ -284,43 +288,37 @@ Tensor matmul_bt(const Tensor& a, const Tensor& b, size_t n_threads) {
     const size_t M = a.shape()[0], K = a.shape()[1], N = b.shape()[0];
     Tensor c({M, N});
 
-    if (n_threads == 0) n_threads = std::thread::hardware_concurrency();
-    if (n_threads == 0) n_threads = 1;
+    if (n_threads == 0) n_threads = pool_threads();
     // Work per row is N*K; split rows when there is enough of it to be
-    // worth a thread. The LM head is (T x 768) @ (768 x 50257)^T: at
-    // T=1 that is a single row of 38M multiply-adds, so for tiny M we
-    // split over columns of C (rows of B) instead.
+    // worth a task. The LM head is (T x 768) @ (768 x 50257)^T: at T=1
+    // that is a single row of 38M multiply-adds, so for tiny M we split
+    // over columns of C (rows of B) instead.
     const float* A = a.data();
     const float* B = b.data();
     float* C = c.data();
+    const size_t oversub = 4;
     if (M >= n_threads * 4) {
-        const size_t rows_per = (M + n_threads - 1) / n_threads;
-        std::vector<std::thread> pool;
-        for (size_t t = 0; t < n_threads; ++t) {
+        const size_t rows_per = (M + n_threads * oversub - 1) / (n_threads * oversub);
+        const size_t n_chunks = (M + rows_per - 1) / rows_per;
+        parallel_for(n_chunks, [&](size_t t) {
             const size_t i0 = t * rows_per, i1 = std::min(M, i0 + rows_per);
-            if (i0 >= i1) break;
-            pool.emplace_back(bt_rows, A, B, C, K, N, i0, i1);
-        }
-        for (auto& th : pool) th.join();
+            bt_rows(A, B, C, K, N, i0, i1);
+        });
     } else if (static_cast<double>(M) * N * K >= 1e6 && N >= n_threads) {
-        // Column split: thread t computes C[:, j0:j1] by treating the
+        // Column split: task t computes C[:, j0:j1] by treating the
         // corresponding rows of B as its own smaller B.
-        const size_t cols_per = (N + n_threads - 1) / n_threads;
-        std::vector<std::thread> pool;
-        for (size_t t = 0; t < n_threads; ++t) {
+        const size_t cols_per = (N + n_threads * oversub - 1) / (n_threads * oversub);
+        const size_t n_chunks = (N + cols_per - 1) / cols_per;
+        parallel_for(n_chunks, [&](size_t t) {
             const size_t j0 = t * cols_per, j1 = std::min(N, j0 + cols_per);
-            if (j0 >= j1) break;
-            pool.emplace_back([=] {
-                for (size_t i = 0; i < M; ++i) {
-                    // Reuse bt_rows on a one-row A against B[j0:j1],
-                    // writing into a temporary then copying into place.
-                    std::vector<float> tmp(j1 - j0);
-                    bt_rows(A + i * K, B + j0 * K, tmp.data(), K, j1 - j0, 0, 1);
-                    std::copy(tmp.begin(), tmp.end(), C + i * N + j0);
-                }
-            });
-        }
-        for (auto& th : pool) th.join();
+            for (size_t i = 0; i < M; ++i) {
+                // Reuse bt_rows on a one-row A against B[j0:j1], writing
+                // into a temporary then copying into place.
+                std::vector<float> tmp(j1 - j0);
+                bt_rows(A + i * K, B + j0 * K, tmp.data(), K, j1 - j0, 0, 1);
+                std::copy(tmp.begin(), tmp.end(), C + i * N + j0);
+            }
+        });
     } else {
         bt_rows(A, B, C, K, N, 0, M);
     }

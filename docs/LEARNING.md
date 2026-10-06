@@ -864,3 +864,105 @@ path at real decode sizes.
 - "C++ Concurrency in Action" (Williams), ch. 9 - thread pools
 - Any write-up on `std::barrier` / `std::latch` (C++20) - the
   synchronization the pool needs
+
+---
+
+## Day 13 (2026-10-05): The persistent thread pool - and a surprise from the efficiency cores
+
+**What we built:** `src/pool.h` / `src/pool.cpp`: a pool of
+`hardware_concurrency() - 1` worker threads created once per process,
+and one function on top of it, `parallel_for(n_tasks, fn)`, which runs
+`fn(0..n-1)` across the workers *and* the calling thread and returns
+when every task is done. `matmul_threaded` and `matmul_bt` no longer
+spawn threads; they call `parallel_for` with the same row/column
+partitions as before. Then a second change the pool made possible:
+**4x oversubscription** - ~4 chunks per thread instead of one, handed
+out through an atomic counter.
+
+**Measured (same machine, same session, random weights at the 124M shape):**
+
+| | Day 12 (spawn per call) | pool, 1 chunk/thread | pool + 4x oversubscription |
+|---|---|---|---|
+| decode step, 64-token cache | 16.7 ms | 10.5 ms | **10.4 ms** |
+| generate 32 tokens, KV cache | 62.7 tok/s | 77.2 tok/s | **84.7 tok/s** |
+| (1 x 768) @ (768 x 3072) | 32.8 GFLOP/s | 46.2 | 44.4 |
+| square N=512, threaded | 158 GFLOP/s | 160 | **200** |
+| square N=1024, threaded | 106 GFLOP/s | **34** | **124** |
+| weight traffic during decode | 30 GB/s | 47 GB/s | 48 GB/s |
+
+Decode is 1.6x faster: the spawn overhead Day 12 predicted was real.
+The N=1024 column is the interesting one - read on.
+
+**The concepts:**
+
+- **Spawn vs wake.** `std::thread` creation allocates a stack, asks the
+  kernel for a thread, and schedules it: tens of microseconds, times 11
+  threads, times ~60 matmuls per token. A pool pays that once. After
+  that, publishing a job is one mutex-protected pointer store plus
+  `notify_all`, and claiming a task is a single `fetch_add`.
+
+- **The straggler race (why each job owns its counters).** The first
+  draft kept `next` and `done` in the pool and reset them per job. Bug:
+  a worker finishing job N does one final `fetch_add` on `next` - which
+  may happen *after* the caller saw `done == n`, returned, and reset
+  `next = 0` for job N+1. The straggler now holds task 0 of the new job
+  but job N's function, whose captured pointers (A, B, C) are gone. Fix:
+  every job is its own heap object (`shared_ptr<Job>`) with its own
+  `fn` copy and counters; a straggler only ever touches the job it was
+  handed, finds `next >= n_tasks`, and leaves. This is the standard
+  shape of the bug in every hand-written pool - worth knowing cold.
+
+- **Memory ordering, minimally.** Tasks write to C on worker threads;
+  the caller reads C after `parallel_for` returns. The guarantee comes
+  from `done.fetch_add(release)` in the worker and `done.load(acquire)`
+  in the caller: everything the worker wrote before the release is
+  visible after the acquire. `next` only needs `relaxed` - it is a
+  ticket dispenser, not a publication of data.
+
+- **Spin, then sleep.** During decode, jobs arrive every ~100 us. A
+  worker that goes to sleep on the condition variable pays a futex
+  sleep + wake (tens of us each way) per job - a large fraction of the
+  work. So workers spin for a bounded budget (`kSpinIters` yields)
+  checking the generation counter, and only then block. The bound is
+  what keeps an idle process from pinning ten cores. The caller never
+  sleeps while waiting: what remains is microseconds away.
+
+- **Static chunks on heterogeneous cores - the N=1024 surprise.** With
+  the pool but one chunk per thread, the square N=1024 case *fell* from
+  106 to 34 GFLOP/s. Why would persistent threads be slower than fresh
+  ones doing identical work? Because this chip has performance and
+  efficiency cores. Fresh threads tend to land on P-cores; persistent
+  workers get parked wherever the scheduler left them, some on E-cores.
+  With one fixed slice per thread, the job finishes when the slowest
+  slice finishes - and a 1024/11-row slice on an E-core is slow. The
+  fix is not to fight the scheduler but to stop pre-assigning work:
+  cut ~4x more chunks than threads and let the atomic counter hand them
+  out. Fast cores take more chunks, slow cores take fewer, nobody
+  waits. N=1024 went to 124 GFLOP/s - above the spawn version - and
+  N=512 to 200. This is the difference between *static* and *dynamic*
+  scheduling, and the lesson generalizes: on any machine with uneven
+  cores, or any work with uneven chunks, dynamic wins.
+
+- **Where the time is now.** Decode moves the 496 MB of weights
+  through memory once per token at ~48 GB/s. Apple Silicon can sustain
+  well over 100 GB/s, so we are not bandwidth-bound yet; the remaining
+  cost is traffic *around* the matmuls - per-head copies in attention,
+  per-call allocations of C and temporaries. That, not the kernel, is
+  the next target.
+
+**Do now:**
+1. Read `Job::work()` and explain, in one sentence, why a worker that
+   wakes up late cannot corrupt anything.
+2. Set `oversub = 1` in `tensor.cpp`, run `make bench`, and watch the
+   N=1024 row. Put it back.
+3. Count the allocations in one decode step (`grep -n "Tensor .*({"`
+   in `ops.cpp` and `model.cpp`). Each is a `std::vector` of floats,
+   zero-filled. That is the Day 14 list.
+
+**Resources:**
+- "C++ Concurrency in Action" (Williams), ch. 9 - thread pools, and
+  ch. 5 for release/acquire
+- Apple, "Prioritize Work with Quality of Service Classes" - how macOS
+  places threads on P and E cores
+- "What Every Programmer Should Know About Memory" (Drepper), section 6 -
+  bandwidth limits the next step runs into
