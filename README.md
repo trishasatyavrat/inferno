@@ -40,6 +40,9 @@ decode cost.
 - [x] Column-split threading for T=1 matmuls (decode 20 -> 15.6 ms/token)
 - [x] Persistent thread pool + 4x oversubscribed chunks (decode 16.7 -> 10.4 ms/token; 84.7 tok/s)
 - [ ] Memory traffic around the matmuls: per-head copies, per-call allocations
+- [x] Fused attention reading the KV cache in place (decode 11.0 -> 9.7 ms)
+- [x] Per-op decode profile: weight matmuls are 88% and already near memory bandwidth
+- [ ] float16 / int8 weights (decode is memory-bound; fewer bytes is the only lever left)
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)
 
 ## Benchmarks
@@ -90,6 +93,7 @@ the scheduler had parked on an efficiency core. Details in
 make test     # correctness: all matmul variants must agree
 make bench    # matmul variants: GFLOP/s each
 make bench-e2e # full model vs PyTorch: forward, decode step, generation
+make bench-decode # per-op breakdown of one decode step (where the time goes)
 make pytest   # harness against PyTorch: every op + the full model (needs .venv)
 make weights  # one-time: download GPT-2 small (548 MB) -> weights/gpt2.bin
 make inferno  # the CLI: ./build/inferno weights/gpt2.bin --prompt "The capital of France is"
@@ -109,7 +113,8 @@ Python harness needs a venv with torch, numpy and pybind11.
 - `tools/export_gpt2.py` — Hugging Face checkpoint -> `weights/gpt2.bin`
   + `weights/tokenizer.bin`
 - `tests/` — C++ assert tests + the Python/PyTorch fuzzing harness
-- `bench/` — `bench_matmul.cpp` (GFLOP/s per variant),
+- `bench/` — `bench_matmul.cpp` (GFLOP/s per variant), `bench_decode.cpp`
+  (per-op decode profile),
   `bench_e2e.py` (full model vs PyTorch)
 - `docs/LEARNING.md` — the running lab notebook: what each piece is,
   why it exists, what was measured

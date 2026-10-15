@@ -9,7 +9,7 @@ build/test_tensor: $(SRC) $(TESTS) $(HDRS)
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(SRC) $(TESTS) -o $@
 
-.PHONY: test clean pymodule pytest bench bench-e2e inferno weights
+.PHONY: test clean pymodule pytest bench bench-e2e bench-decode inferno weights
 
 test: build/test_tensor
 	./build/test_tensor
@@ -36,6 +36,14 @@ build/bench_matmul: $(SRC) bench/bench_matmul.cpp $(HDRS)
 
 bench: build/bench_matmul
 	./build/bench_matmul
+
+# Per-op breakdown of one decode step: where the time actually goes.
+build/bench_decode: $(SRC) bench/bench_decode.cpp $(HDRS)
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(SRC) bench/bench_decode.cpp -o $@
+
+bench-decode: build/bench_decode
+	./build/bench_decode 64
 
 # End-to-end: inferno vs PyTorch on the full 124M model (needs .venv).
 bench-e2e: pymodule
