@@ -966,3 +966,65 @@ The N=1024 column is the interesting one - read on.
   places threads on P and E cores
 - "What Every Programmer Should Know About Memory" (Drepper), section 6 -
   bandwidth limits the next step runs into
+
+---
+
+## Day 14 (2026-10-14): Fused attention - stop copying the cache
+
+**What we built:** the per-head attention loop is now one fused kernel.
+`parallel_for` over (head, new token) pairs; each task reads its 64-float
+query slice and walks the cached keys and values *in place*, computing
+scores, softmax, and the weighted sum of values in one pass, and writes
+its 64 outputs straight into the concatenated result. Gone: the per-head
+copy of Q, the materialized K^T, the V slice, the (n x L) score tensor,
+and every Tensor allocation inside the head loop. `slice_cols` is deleted.
+
+**Measured (median of 3 runs each, same machine, same session):**
+
+| | before | after |
+|---|---|---|
+| forward, 64 tokens | 254 ms | 242 ms |
+| decode step, 64 cached | 11.0 ms | 9.7 ms |
+
+**The concepts:**
+
+- **What was being copied.** For every head at every layer, the old code
+  built K^T by reading the cache column-wise into a new (64 x L) tensor,
+  copied V into a (L x 64) tensor, then ran two general matmuls on them.
+  At decode (n=1) those matmuls are a 1 x 64 by 64 x L dot product and a
+  1 x L by L x 64 weighted sum: tiny work wrapped in large copies. The
+  fused kernel does the same arithmetic reading the cache where it
+  already lives.
+
+- **Why only 5-12%.** Attention at T=64 is a small slice of the total;
+  the weight matmuls (QKV, projection, MLP, LM head) dominate. This
+  change removed overhead from the minor cost, which is exactly what
+  profiling first would have predicted. Worth doing - it also removed
+  ~50 allocations per layer - but the honest headline is modest.
+
+- **Skipping masked work instead of masking it.** The old code computed
+  every (i, j) score and then overwrote j > pos with -inf. The fused loop
+  only visits j <= pos. During prefill that halves the score work; during
+  decode it changes nothing (the one new token sees everything).
+
+- **thread_local scratch.** Each task needs a buffer of L scores. A
+  `std::vector` per task would be one heap allocation per (head, token).
+  `thread_local` gives each pool worker one buffer for the life of the
+  process, grown when L grows. Allocation moved out of the hot loop
+  without any locking.
+
+- **Benchmarks on a laptop are noisy.** Single runs swung by 15%, and
+  PyTorch's own row moved from 22.6 to 38.9 tok/s between two runs. The
+  table above is a median of three, before and after, back to back. One
+  run is an anecdote.
+
+**Do now:**
+1. `make pytest` - attention still matches PyTorch on all seven shapes.
+2. In the fused kernel, find the line that makes the causal mask
+   unnecessary. (Hint: the loop bound.)
+3. Count allocations per layer before and after: read the old version
+   with `git show HEAD~1:src/ops.cpp`.
+
+**Resources:**
+- FlashAttention paper (Dao et al. 2022), §3.1 - the GPU version of this
+  idea, adding tiling so the score row never leaves fast memory

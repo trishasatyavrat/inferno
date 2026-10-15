@@ -1,4 +1,6 @@
 #include "ops.h"
+#include "pool.h"
+#include <vector>
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -115,17 +117,6 @@ Tensor linear(const Tensor& x, const Tensor& w, const Tensor& b) {
     return y;
 }
 
-// Copy columns [c0, c0+width) of a (rows, cols) tensor into a new
-// (rows, width) tensor. Attention slices Q, K, V per head this way.
-static Tensor slice_cols(const Tensor& t, size_t c0, size_t width) {
-    const size_t rows = t.shape()[0], cols = t.shape()[1];
-    Tensor out({rows, width});
-    for (size_t i = 0; i < rows; ++i)
-        std::copy(t.data() + i * cols + c0, t.data() + i * cols + c0 + width,
-                  out.data() + i * width);
-    return out;
-}
-
 Tensor attention_cached(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
                         const Tensor& w_proj, const Tensor& b_proj, size_t n_head,
                         Tensor& k_cache, Tensor& v_cache, size_t start) {
@@ -157,43 +148,52 @@ Tensor attention_cached(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qk
                   v_cache.data() + (start + i) * C);
     }
 
+    // Fused attention: one task per (head, new token). Each task reads
+    // its 64-float query slice and walks the cached keys and values IN
+    // PLACE - no per-head copy of Q, no materialized K^T, no V slice, no
+    // (n x L) score tensor. Tasks write disjoint 64-float slices of
+    // `concat`, so they run in parallel with no locking. Masked
+    // positions (j > pos) are never computed at all, rather than
+    // computed and then overwritten with -inf.
     Tensor concat({n, C});  // every head's output, side by side
-    for (size_t h = 0; h < n_head; ++h) {
-        Tensor q = slice_cols(qkv, h * hs, hs);                       // (n, hs)
-        // K^T and V over ALL L positions, read from the cache.
-        Tensor kT({hs, L});
-        for (size_t j = 0; j < L; ++j)
-            for (size_t d = 0; d < hs; ++d)
-                kT.data()[d * L + j] = k_cache.data()[j * C + h * hs + d];
-        Tensor v({L, hs});
-        for (size_t j = 0; j < L; ++j)
-            std::copy(v_cache.data() + j * C + h * hs, v_cache.data() + j * C + (h + 1) * hs,
-                      v.data() + j * hs);
+    const float* QKV = qkv.data();
+    const float* K = k_cache.data();
+    const float* V = v_cache.data();
+    float* O = concat.data();
 
-        // scores[i][j] = how much new token i (at position start+i)
-        // attends to position j.
-        Tensor scores = matmul_threaded(q, kT);                       // (n, L)
-        float* S = scores.data();
-        for (size_t i = 0; i < n; ++i) {
-            const size_t pos = start + i;
-            for (size_t j = 0; j < L; ++j) {
-                if (j > pos)
-                    // Causal mask: -inf becomes exp(-inf) = 0 in softmax,
-                    // so a token puts zero weight on anything after it.
-                    S[i * L + j] = -std::numeric_limits<float>::infinity();
-                else
-                    // Scale by 1/sqrt(head size) so dot products of
-                    // 64-dim vectors do not saturate the softmax.
-                    S[i * L + j] *= scale;
-            }
+    parallel_for(n_head * n, [&](size_t task) {
+        const size_t h = task / n, i = task % n;
+        const size_t pos = start + i;          // attends to positions 0..pos
+        const float* q = QKV + i * 3 * C + h * hs;
+        // Scratch for this row's scores. thread_local so each worker
+        // allocates once per process, not once per task.
+        thread_local std::vector<float> w;
+        if (w.size() < pos + 1) w.resize(pos + 1);
+
+        // Scores: scaled dot products of q with every visible key.
+        float maxv = -std::numeric_limits<float>::infinity();
+        for (size_t j = 0; j <= pos; ++j) {
+            const float* k = K + j * C + h * hs;
+            float dot = 0.0f;
+            for (size_t d = 0; d < hs; ++d) dot += q[d] * k[d];
+            w[j] = dot * scale;
+            if (w[j] > maxv) maxv = w[j];
         }
-        Tensor weights = softmax(scores);                             // rows sum to 1
-        Tensor out_h = matmul_threaded(weights, v);                   // (n, hs)
+        // Softmax, max-subtracted (same guard as softmax()).
+        float sum = 0.0f;
+        for (size_t j = 0; j <= pos; ++j) { w[j] = std::exp(w[j] - maxv); sum += w[j]; }
+        const float inv = 1.0f / sum;
 
-        for (size_t i = 0; i < n; ++i)
-            std::copy(out_h.data() + i * hs, out_h.data() + (i + 1) * hs,
-                      concat.data() + i * C + h * hs);
-    }
+        // Output: weighted sum of visible values, written straight into
+        // this head's columns of the concatenated output.
+        float* out = O + i * C + h * hs;
+        for (size_t d = 0; d < hs; ++d) out[d] = 0.0f;
+        for (size_t j = 0; j <= pos; ++j) {
+            const float wj = w[j] * inv;
+            const float* v = V + j * C + h * hs;
+            for (size_t d = 0; d < hs; ++d) out[d] += wj * v[d];
+        }
+    });
 
     return linear(concat, w_proj, b_proj);
 }
