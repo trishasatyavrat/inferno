@@ -1028,3 +1028,67 @@ and every Tensor allocation inside the head loop. `slice_cols` is deleted.
 **Resources:**
 - FlashAttention paper (Dao et al. 2022), §3.1 - the GPU version of this
   idea, adding tiling so the score row never leaves fast memory
+
+---
+
+## Day 15 (2026-10-14): Profile before optimizing - decode is at the memory floor
+
+**What we built:** `bench/bench_decode.cpp` (`make bench-decode`) - times
+every operation of one decode step at GPT-2 small's real shapes with 64
+cached positions, and scales per-layer ops by 12 to show each one's
+share of a token.
+
+**Measured:**
+
+| op | us/call | calls | share |
+|---|---|---|---|
+| mlp fc 768 -> 3072 | 135.6 | 12 | 24.0% |
+| lm head 768 -> 50257 | 1425.0 | 1 | 21.0% |
+| mlp proj 3072 -> 768 | 108.2 | 12 | 19.1% |
+| qkv linear 768 -> 2304 | 98.7 | 12 | 17.5% |
+| attention core (fused) | 59.0 | 12 | 10.4% |
+| attn proj 768 -> 768 | 34.9 | 12 | 6.2% |
+| gelu, layernorm, residual add | - | - | 1.8% |
+
+Sum of parts: 6.8 ms. The end-to-end decode step measured 9.7 ms; the
+gap is everything around the ops (Tensor allocation per call, the Python
+binding in the e2e harness).
+
+**The concepts:**
+
+- **The four weight matmuls plus the head are 88% of a token.** Day 14
+  optimized attention, which turns out to be 10%. That is the Day 3
+  lesson again at a larger scale: find the bottleneck by measuring, not
+  by guessing which code looks slow.
+
+- **Those matmuls are already near the hardware limit.** Divide bytes by
+  time. The MLP fc weights are 768 x 3072 x 4 bytes = 9.4 MB, read in
+  135.6 us: 70 GB/s. The LM head is 154 MB in 1.43 ms: 108 GB/s. This
+  laptop's memory bandwidth is in that range. At decode, each weight is
+  used for exactly one multiply-add per token, so the matmul cannot run
+  faster than the weights can be read. More threads, better SIMD, smarter
+  loops: none of it moves a memory-bound number.
+
+- **So the next lever is fewer bytes, not faster math.** Store the
+  weights in float16 (half the bytes) or int8 (a quarter), convert to
+  float32 in registers as they are used. That is what quantization in
+  llama.cpp and every production inference engine is for. It is now the
+  clear next project milestone, and the profile is the argument for it.
+
+- **What I chose not to do.** The plan going in was an in-place residual
+  add to avoid allocations. The table puts residual adds at 0.0% of a
+  token. Shipping it would be activity, not progress. Not doing it is
+  the result of the measurement.
+
+**Do now:**
+1. `make bench-decode`, then `./build/bench_decode 512`: watch only the
+   attention row grow with context length. Everything else is fixed by
+   the weights.
+2. Compute GB/s for the qkv and mlp proj rows yourself.
+3. Estimate the float16 decode time: halve the weight-matmul rows, keep
+   the rest. That is the number the next milestone has to hit.
+
+**Resources:**
+- "Roofline model" (Williams et al., or any lecture notes) - the
+  compute-bound vs memory-bound picture, one chart
+- llama.cpp quantization docs (Q8_0, Q4_0) - what "fewer bytes" looks like
