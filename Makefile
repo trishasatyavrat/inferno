@@ -1,8 +1,8 @@
 CXX      := c++
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2
 
-SRC   := src/tensor.cpp src/pool.cpp src/ops.cpp src/model.cpp src/checkpoint.cpp src/generate.cpp src/tokenizer.cpp
-HDRS  := src/tensor.h src/pool.h src/ops.h src/model.h src/checkpoint.h src/generate.h src/tokenizer.h
+SRC   := src/tensor.cpp src/half.cpp src/pool.cpp src/ops.cpp src/model.cpp src/checkpoint.cpp src/generate.cpp src/tokenizer.cpp
+HDRS  := src/tensor.h src/half.h src/pool.h src/ops.h src/model.h src/checkpoint.h src/generate.h src/tokenizer.h
 TESTS := tests/test_tensor.cpp
 
 build/test_tensor: $(SRC) $(TESTS) $(HDRS)
@@ -11,8 +11,13 @@ build/test_tensor: $(SRC) $(TESTS) $(HDRS)
 
 .PHONY: test clean pymodule pytest bench bench-e2e bench-decode inferno weights
 
-test: build/test_tensor
+build/test_half: $(SRC) tests/test_half.cpp $(HDRS)
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(SRC) tests/test_half.cpp -o $@
+
+test: build/test_tensor build/test_half
 	./build/test_tensor
+	./build/test_half
 
 # Build the Python extension module into build/ using the project venv.
 # -undefined dynamic_lookup is the macOS way to leave Python symbols

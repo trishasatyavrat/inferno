@@ -1092,3 +1092,37 @@ binding in the e2e harness).
 - "Roofline model" (Williams et al., or any lecture notes) - the
   compute-bound vs memory-bound picture, one chart
 - llama.cpp quantization docs (Q8_0, Q4_0) - what "fewer bytes" looks like
+
+---
+
+## Day 16 (2026-10-19): A float16 storage type
+
+**What we built:** `src/half.h/.cpp` - `HalfMatrix` (a row-major matrix
+of `__fp16`), `to_half` (NEON, 8 floats per instruction, round to
+nearest even) and `to_float`. Tests: exact values round-trip exactly,
+and 105k normally distributed weights round-trip with worst relative
+error 4.9e-4. Nothing uses it yet; the kernels are next.
+
+**The concepts:**
+
+- **Why this, why now.** Day 15 showed the weight matmuls are 88% of a
+  decode step and already read memory near the bus's limit. Halving the
+  bytes per weight is the one lever left. Storage only: every multiply
+  and every accumulator stays float32.
+
+- **What a half is.** 16 bits: 1 sign, 5 exponent, 10 mantissa. About 3
+  significant decimal digits, range +-65504. One rounding costs at most
+  half a unit in the last place, a relative error of 2^-11 = 4.9e-4 for
+  normal values. The test measures exactly that bound.
+
+- **Subnormals are excluded from the bound on purpose.** Below ~6.1e-5 a
+  half loses precision gradually. GPT-2 weights that small contribute
+  almost nothing to any dot product, so the test skips them rather than
+  pretending the bound holds there.
+
+- **`#error` on non-ARM targets.** `__fp16` is an ARM type. The header
+  refuses to compile elsewhere instead of silently falling back to
+  something slower or wrong.
+
+**Do now:** `make test`, then change the distribution's std to 1000 and
+see which assertion fails (hint: 65504).
