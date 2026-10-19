@@ -42,7 +42,9 @@ decode cost.
 - [ ] Memory traffic around the matmuls: per-head copies, per-call allocations
 - [x] Fused attention reading the KV cache in place (decode 11.0 -> 9.7 ms)
 - [x] Per-op decode profile: weight matmuls are 88% and already near memory bandwidth
-- [ ] float16 / int8 weights (decode is memory-bound; fewer bytes is the only lever left)
+- [x] float16 weights (`--fp16`): 83.5 -> 129.8 tok/s cached, logits within 1% of fp32 at random weights
+- [ ] Text-quality check of fp16 on the real checkpoint (needs `make weights`)
+- [ ] int8 weights
 - [ ] Extension: one custom CUDA/Triton kernel (Colab)
 
 ## Benchmarks

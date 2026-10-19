@@ -69,6 +69,17 @@ def main():
     n_new = 32
     print(f"\ngenerate {n_new} tokens from a 16-token prompt (greedy):")
     t_cache = timeit(lambda: model.generate(prompt, max_new=n_new, temperature=0.0, use_cache=True), reps=2)
+    # Same model with float16 weights (to_half is one-way, so a second copy).
+    if source.startswith("weights/"):
+        model16 = inferno_core.GPT2(path)
+    else:
+        model16 = inferno_core.GPT2(FULL["n_vocab"], FULL["n_ctx"], FULL["n_embd"], FULL["n_head"],
+                                    FULL["n_layer"], params)
+    model16.to_half()
+    t_cache16 = timeit(lambda: model16.generate(prompt, max_new=n_new, temperature=0.0, use_cache=True), reps=2)
+    steps16 = [[int(v)] for v in rng.integers(0, FULL["n_vocab"], size=32)]
+    per_step16 = max(timeit(lambda: model16.forward_chunked([seq64] + steps16), reps=2)
+                     - timeit(lambda: model16.forward_chunked([seq64]), reps=2), 0) / len(steps16)
     t_nocache = timeit(lambda: model.generate(prompt, max_new=n_new, temperature=0.0, use_cache=False), reps=1)
 
     def torch_loop():
@@ -79,6 +90,8 @@ def main():
         return toks
     t_torch_loop = timeit(torch_loop, reps=1)
     print(f"  inferno, KV cache       {t_cache:6.2f} s  ({n_new / t_cache:5.1f} tok/s)")
+    print(f"  inferno, KV cache, fp16 {t_cache16:6.2f} s  ({n_new / t_cache16:5.1f} tok/s)  "
+          f"decode step {per_step16 * 1e3:.1f} ms")
     print(f"  inferno, full recompute {t_nocache:6.2f} s  ({n_new / t_nocache:5.1f} tok/s)  "
           f"cache speedup {t_nocache / t_cache:.1f}x")
     print(f"  torch, full recompute   {t_torch_loop:6.2f} s  ({n_new / t_torch_loop:5.1f} tok/s)")

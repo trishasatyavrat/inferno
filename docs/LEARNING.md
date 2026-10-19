@@ -1222,3 +1222,41 @@ token-for-token identical.
 
 **Do now:** `make pytest`, then read `run_block` in `model.cpp` and find
 the one line that chooses float16 or float32.
+
+---
+
+## Day 19 (2026-10-19): What float16 bought, end to end
+
+**What we built:** `make bench-e2e` now also runs the same model after
+`to_half()` and reports generation speed and the decode step.
+
+**Measured (median of 3 runs, random weights at GPT-2 small shape):**
+
+| | fp32 weights | fp16 weights |
+|---|---|---|
+| generate 32 tokens, KV cache | 83.5 tok/s | 129.8 tok/s |
+| decode step, 64 cached | 9.3 ms | 6.1 ms |
+
+1.55x on generation, from halving the bytes the decode step reads.
+
+**The concepts:**
+
+- **The prediction held.** Day 15's profile said the weight matmuls
+  were 88% of a token and memory-bound, so halving their bytes should
+  cut most of that 88% by up to half. Day 17 measured 1.5-1.9x on those
+  matmuls alone. End to end that lands at 1.55x, because the 12% that is
+  not weight matmuls did not get faster. Profile, predict, measure, and
+  the three agree: that is the whole method in one week.
+
+- **Why the runs disagreed.** The third run measured fp32 decode at
+  6.7 ms and fp16 at 3.6 ms, both far below the other two. Laptop
+  benchmarks move with temperature, power state and background load.
+  The median of three is the honest number; the best run would be a
+  flattering one.
+
+- **The open question, stated plainly.** All accuracy evidence so far
+  is at random weights. On the released checkpoint, the test is whether
+  the generated text changes. That needs the 548 MB download.
+
+**Do now:** run `make bench-e2e` twice and note how much your own runs
+disagree.
