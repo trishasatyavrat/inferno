@@ -217,6 +217,41 @@ def check_kv_cache(small, p_small, full, p_full, rng):
     if len(model.generate(prompt, max_new=100, temperature=0.0)) != small["n_ctx"]:
         raise AssertionError("cached generate did not stop at n_ctx")
 
+def check_fp16(cfgs_params, rng):
+    """float16 weights vs float32 on the same model.
+
+    Random weights, so this measures what rounding the weights does to
+    the logits, not output quality. Bounds: max logit change under 1% of
+    the logits' own spread; the top prediction identical on every row;
+    top-5 sets nearly identical; the cached half path equal to the full
+    half path; parameter count unchanged.
+    """
+    for cfg, p in cfgs_params:
+        args = (cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_head"], cfg["n_layer"], p)
+        f32, f16 = inferno_core.GPT2(*args), inferno_core.GPT2(*args)
+        f16.to_half()
+        if not f16.is_half or f32.is_half or f16.n_params() != f32.n_params():
+            raise AssertionError("to_half bookkeeping wrong")
+        toks = [int(t) for t in rng.integers(0, cfg["n_vocab"], size=12)]
+        a, b = f32.forward(toks), f16.forward(toks)
+        if np.abs(a - b).max() > 0.01 * a.std():
+            raise AssertionError(f"fp16 logits moved {np.abs(a - b).max():.4f} (std {a.std():.3f})")
+        if not np.array_equal(a.argmax(-1), b.argmax(-1)):
+            raise AssertionError("fp16 changed a top prediction")
+        overlap = np.mean([len(set(np.argsort(-a[i])[:5]) & set(np.argsort(-b[i])[:5])) / 5
+                           for i in range(len(toks))])
+        if overlap < 0.9:
+            raise AssertionError(f"fp16 top-5 overlap {overlap:.2f}")
+        cached = f16.forward_chunked([toks[:5]] + [[t] for t in toks[5:]])[-1]
+        if not np.allclose(cached, b[-1], rtol=1e-4, atol=1e-4):
+            raise AssertionError("fp16 cached path diverges from full path")
+    cfg, p = cfgs_params[0]
+    args = (cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_head"], cfg["n_layer"], p)
+    f32, f16 = inferno_core.GPT2(*args), inferno_core.GPT2(*args)
+    f16.to_half()
+    if f32.generate([7, 3, 9], max_new=8, temperature=0.0) != f16.generate([7, 3, 9], max_new=8, temperature=0.0):
+        raise AssertionError("fp16 greedy generation differs from fp32 on the toy model")
+
 def check_sampling(cfg, p, rng):
     model = inferno_core.GPT2(cfg["n_vocab"], cfg["n_ctx"], cfg["n_embd"], cfg["n_head"],
                               cfg["n_layer"], p)
@@ -345,6 +380,10 @@ def main():
     check_kv_cache(small, p_small, full, p_full, rng)
     print("kv cache: prefill + single steps == full forward (toy and 124M); "
           "cached generation == uncached, greedy and sampled")
+
+    check_fp16([(small, p_small), (full, p_full)], rng)
+    print("fp16 weights: logits within 1% of their spread, same argmax, top-5 kept, "
+          "cached == full, greedy text unchanged (toy and 124M)")
 
     check_sampling(small, p_small, rng)
     print("generation: greedy == argmax loop, seeds reproduce, top-k respected, "

@@ -117,13 +117,32 @@ Tensor linear(const Tensor& x, const Tensor& w, const Tensor& b) {
     return y;
 }
 
-Tensor attention_cached(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
-                        const Tensor& w_proj, const Tensor& b_proj, size_t n_head,
+// Shape accessors that work for both weight storages.
+static size_t rows_of(const Tensor& t) { return t.shape()[0]; }
+static size_t cols_of(const Tensor& t) { return t.shape()[1]; }
+static size_t rows_of(const HalfMatrix& h) { return h.rows; }
+static size_t cols_of(const HalfMatrix& h) { return h.cols; }
+
+Tensor linear(const Tensor& x, const HalfMatrix& w, const Tensor& b) {
+    if (b.size() != w.cols)
+        throw std::invalid_argument("linear: bias must match output dim");
+    Tensor y = matmul_h(x, w);
+    const size_t rows = y.shape()[0], out_dim = w.cols;
+    float* Y = y.data();
+    const float* B = b.data();
+    for (size_t i = 0; i < rows; ++i)
+        for (size_t j = 0; j < out_dim; ++j) Y[i * out_dim + j] += B[j];
+    return y;
+}
+
+template <typename W>
+Tensor attention_cached(const Tensor& x, const W& w_qkv, const Tensor& b_qkv,
+                        const W& w_proj, const Tensor& b_proj, size_t n_head,
                         Tensor& k_cache, Tensor& v_cache, size_t start) {
     const size_t n = x.shape()[0], C = x.shape()[1];
     if (n_head == 0 || C % n_head != 0)
         throw std::invalid_argument("attention: C must be divisible by n_head");
-    if (w_qkv.shape()[0] != C || w_qkv.shape()[1] != 3 * C)
+    if (rows_of(w_qkv) != C || cols_of(w_qkv) != 3 * C)
         throw std::invalid_argument("attention: w_qkv must be (C, 3C)");
     if (k_cache.shape()[1] != C || v_cache.shape()[1] != C)
         throw std::invalid_argument("attention: cache width must be C");
@@ -206,9 +225,20 @@ Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
     return attention_cached(x, w_qkv, b_qkv, w_proj, b_proj, n_head, k, v, 0);
 }
 
-Tensor mlp(const Tensor& x, const Tensor& w_fc, const Tensor& b_fc,
-           const Tensor& w_proj, const Tensor& b_proj) {
+template <typename W>
+Tensor mlp(const Tensor& x, const W& w_fc, const Tensor& b_fc,
+           const W& w_proj, const Tensor& b_proj) {
     return linear(gelu(linear(x, w_fc, b_fc)), w_proj, b_proj);
 }
+
+// The two weight storages the model uses. Explicit instantiation keeps
+// the definitions in this file while letting model.cpp call both.
+template Tensor attention_cached<Tensor>(const Tensor&, const Tensor&, const Tensor&,
+    const Tensor&, const Tensor&, size_t, Tensor&, Tensor&, size_t);
+template Tensor attention_cached<HalfMatrix>(const Tensor&, const HalfMatrix&, const Tensor&,
+    const HalfMatrix&, const Tensor&, size_t, Tensor&, Tensor&, size_t);
+template Tensor mlp<Tensor>(const Tensor&, const Tensor&, const Tensor&, const Tensor&, const Tensor&);
+template Tensor mlp<HalfMatrix>(const Tensor&, const HalfMatrix&, const Tensor&,
+    const HalfMatrix&, const Tensor&);
 
 } // namespace inferno

@@ -100,11 +100,14 @@ GPT2Weights load_checkpoint(const std::string& path) {
 }
 
 size_t param_count(const GPT2Weights& w) {
-    size_t n = w.wte.size() + w.wpe.size() + w.lnf_g.size() + w.lnf_b.size();
+    // Counts parameters, not bytes: a half matrix counts the same as the
+    // float32 one it replaced.
+    size_t n = w.wte.size() + w.h_wte.size() + w.wpe.size() + w.lnf_g.size() + w.lnf_b.size();
     for (const auto& b : w.blocks)
-        n += b.ln1_g.size() + b.ln1_b.size() + b.w_qkv.size() + b.b_qkv.size() +
-             b.w_attn_proj.size() + b.b_attn_proj.size() + b.ln2_g.size() + b.ln2_b.size() +
-             b.w_fc.size() + b.b_fc.size() + b.w_mlp_proj.size() + b.b_mlp_proj.size();
+        n += b.ln1_g.size() + b.ln1_b.size() + b.w_qkv.size() + b.h_qkv.size() + b.b_qkv.size() +
+             b.w_attn_proj.size() + b.h_attn_proj.size() + b.b_attn_proj.size() +
+             b.ln2_g.size() + b.ln2_b.size() + b.w_fc.size() + b.h_fc.size() + b.b_fc.size() +
+             b.w_mlp_proj.size() + b.h_mlp_proj.size() + b.b_mlp_proj.size();
     return n;
 }
 

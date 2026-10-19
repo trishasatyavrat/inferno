@@ -1174,3 +1174,51 @@ prefill and ragged shapes, plus the full 1 x 768 @ (50257 x 768)^T head.
 **Do now:** `make bench`, read the decode table, and compute the
 expected per-token saving: sum (fp32 - fp16) x 12 layers for the three
 big rows.
+
+---
+
+## Day 18 (2026-10-19): The model in float16
+
+**What we built:** `to_half(model)` converts the four weight matrices in
+every layer and the tied embedding/LM-head matrix `wte` to float16 and
+frees the float32 copies. Together that is 98% of the parameters.
+`attention_cached` and `mlp` became templates over the weight storage
+(`Tensor` or `HalfMatrix`), explicitly instantiated for both, so there
+is still one implementation of each layer. The full (uncached) forward
+pass now runs through the same cached block with a throwaway cache, so
+both paths share one code path too. CLI: `--fp16`. Python:
+`GPT2.to_half()`, `is_half`.
+
+**Measured accuracy (random weights, 12 tokens):**
+
+| model | logit spread (std) | max change | top-1 agree | top-5 overlap |
+|---|---|---|---|---|
+| 2-layer toy | 0.114 | 0.0002 | 100% | 100% |
+| GPT-2 small shape | 0.556 | 0.0019 | 100% | 100% |
+
+The test asserts the max change stays under 1% of the spread, every top
+prediction is unchanged, top-5 overlap is at least 90%, the cached half
+path equals the full half path, and greedy generation on the toy is
+token-for-token identical.
+
+**The concepts:**
+
+- **What stays float32, and why.** Embedding positions, LayerNorm
+  parameters, biases, activations, and the KV cache are about 2% of the
+  bytes. Converting them would save almost nothing and add rounding to
+  the numbers every layer depends on most. Precision goes where the
+  bytes are not.
+
+- **Templates instead of copies.** The obvious way to add float16 was a
+  second `attention_cached_h` and `mlp_h`. Two copies of attention would
+  drift the first time one is changed. A template over the weight type
+  plus an overloaded `linear` gives one source of truth, and explicit
+  instantiation keeps the code in `ops.cpp` so compile times do not grow.
+
+- **Random weights measure rounding, not quality.** These numbers say
+  what float16 does to the arithmetic. Whether text quality holds on the
+  real checkpoint is a different question, answered only after
+  `make weights`. That test is not written yet, and the README says so.
+
+**Do now:** `make pytest`, then read `run_block` in `model.cpp` and find
+the one line that chooses float16 or float32.

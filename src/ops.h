@@ -1,5 +1,6 @@
 #pragma once
 #include "tensor.h"
+#include "half.h"
 
 // Neural-network operations, kept separate from tensor.h.
 //
@@ -40,6 +41,9 @@ Tensor add(const Tensor& a, const Tensor& b);
 // exporter can copy them without transposing. Uses the threaded matmul.
 Tensor linear(const Tensor& x, const Tensor& w, const Tensor& b);
 
+// The same with float16 weights (half.h): x @ w + b, w read as half.
+Tensor linear(const Tensor& x, const HalfMatrix& w, const Tensor& b);
+
 // Causal multi-head self-attention, one GPT-2 attention layer.
 //   x:      (T, C)     T tokens, C channels (768 for GPT-2 small)
 //   w_qkv:  (C, 3C)    one fused projection producing Q, K, V
@@ -57,15 +61,27 @@ Tensor attention(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
 // tensors holding K and V for every position seen so far; this call
 // writes the new rows in and attends over everything up to start+n.
 // Plain attention() is this with an empty cache and start = 0.
-Tensor attention_cached(const Tensor& x, const Tensor& w_qkv, const Tensor& b_qkv,
-                        const Tensor& w_proj, const Tensor& b_proj, size_t n_head,
+// W is the weight storage: Tensor (float32) or HalfMatrix (float16).
+// Biases, activations and the cache are always float32.
+template <typename W>
+Tensor attention_cached(const Tensor& x, const W& w_qkv, const Tensor& b_qkv,
+                        const W& w_proj, const Tensor& b_proj, size_t n_head,
                         Tensor& k_cache, Tensor& v_cache, size_t start);
 
 // The MLP (feed-forward) half of a transformer block:
 //   gelu(x @ w_fc + b_fc) @ w_proj + b_proj
 // w_fc is (C, 4C): GPT-2 expands to 3072 channels, applies GELU, and
 // projects back to 768. Two-thirds of the model's parameters live here.
-Tensor mlp(const Tensor& x, const Tensor& w_fc, const Tensor& b_fc,
-           const Tensor& w_proj, const Tensor& b_proj);
+template <typename W>
+Tensor mlp(const Tensor& x, const W& w_fc, const Tensor& b_fc,
+           const W& w_proj, const Tensor& b_proj);
+
+extern template Tensor attention_cached<Tensor>(const Tensor&, const Tensor&, const Tensor&,
+    const Tensor&, const Tensor&, size_t, Tensor&, Tensor&, size_t);
+extern template Tensor attention_cached<HalfMatrix>(const Tensor&, const HalfMatrix&, const Tensor&,
+    const HalfMatrix&, const Tensor&, size_t, Tensor&, Tensor&, size_t);
+extern template Tensor mlp<Tensor>(const Tensor&, const Tensor&, const Tensor&, const Tensor&, const Tensor&);
+extern template Tensor mlp<HalfMatrix>(const Tensor&, const HalfMatrix&, const Tensor&,
+    const HalfMatrix&, const Tensor&);
 
 } // namespace inferno

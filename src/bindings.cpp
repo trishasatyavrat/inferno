@@ -176,6 +176,9 @@ PYBIND11_MODULE(inferno_core, m) {
         .def(py::init<const std::string&>(), py::arg("path"),
              "load an INFR checkpoint written by tools/export_gpt2.py")
         .def("n_params", &PyGPT2::n_params)
+        .def("to_half", [](PyGPT2& g) { inferno::to_half(g.w); },
+             "store the large weight matrices as float16 (one-way)")
+        .def_property_readonly("is_half", [](const PyGPT2& g) { return g.w.half; })
         .def("forward", &PyGPT2::forward, "token ids -> logits (T, n_vocab)")
         .def("generate", &PyGPT2::generate, "prompt ids -> prompt + generated ids",
              py::arg("prompt"), py::arg("max_new") = 20, py::arg("temperature") = 0.8f,

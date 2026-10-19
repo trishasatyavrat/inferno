@@ -8,6 +8,7 @@
 //     --top-k K    keep the K most likely tokens, 0 = all (default 40)
 //     --seed S     random seed (default 1)
 //     --no-cache   recompute the full forward pass every step (baseline)
+//     --fp16       store the large weight matrices as float16 after loading
 //
 // Loads a checkpoint, then generates from the prompt and streams the
 // output. With --prompt, text goes in and text comes out through the
@@ -45,6 +46,7 @@ int main(int argc, char** argv) {
     std::vector<int> prompt;
     std::string prompt_text, tokenizer_path;
     bool have_text = false;
+    bool use_fp16 = false;
     for (int i = 2; i < argc; ++i) {
         auto need = [&](const char* flag) -> const char* {
             if (i + 1 >= argc) { std::fprintf(stderr, "%s needs a value\n", flag); std::exit(2); }
@@ -55,6 +57,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--top-k")) opt.top_k = std::strtoul(need("--top-k"), nullptr, 10);
         else if (!std::strcmp(argv[i], "--seed"))  opt.seed = static_cast<uint32_t>(std::strtoul(need("--seed"), nullptr, 10));
         else if (!std::strcmp(argv[i], "--no-cache")) opt.use_cache = false;
+        else if (!std::strcmp(argv[i], "--fp16")) use_fp16 = true;
         else if (!std::strcmp(argv[i], "--prompt")) { prompt_text = need("--prompt"); have_text = true; }
         else if (!std::strcmp(argv[i], "--tokenizer")) tokenizer_path = need("--tokenizer");
         else if (argv[i][0] == '-' && !std::isdigit(static_cast<unsigned char>(argv[i][1]))) { usage(argv[0]); return 2; }
@@ -85,6 +88,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
+    if (use_fp16) to_half(model);
     auto t1 = Clock::now();
     std::printf("loaded %s: %zu layers, %zu channels, %zu heads, %.1fM parameters in %.2fs\n",
                 argv[1], model.cfg.n_layer, model.cfg.n_embd, model.cfg.n_head,

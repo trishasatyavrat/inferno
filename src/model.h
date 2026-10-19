@@ -1,5 +1,6 @@
 #pragma once
 #include "tensor.h"
+#include "half.h"
 #include <vector>
 
 // The GPT-2 model: its shape (config), its parameters (weights), and
@@ -26,6 +27,9 @@ struct BlockWeights {
     Tensor ln2_g, ln2_b;       // (C,)
     Tensor w_fc, b_fc;         // (C, 4C), (4C,)
     Tensor w_mlp_proj, b_mlp_proj;    // (4C, C), (C,)
+    // float16 copies of the four weight matrices, filled by to_half();
+    // the float32 matrices are released then. Biases stay float32.
+    HalfMatrix h_qkv = {}, h_attn_proj = {}, h_fc = {}, h_mlp_proj = {};
 };
 
 struct GPT2Weights {
@@ -34,6 +38,8 @@ struct GPT2Weights {
     Tensor wpe;   // (n_ctx, C)   position embeddings
     std::vector<BlockWeights> blocks;
     Tensor lnf_g, lnf_b;  // final LayerNorm
+    HalfMatrix h_wte = {};  // float16 wte when half == true
+    bool half = false;
 };
 
 // Per-layer K and V for every position processed so far. Generation
@@ -67,5 +73,11 @@ Tensor gpt2_forward(const GPT2Weights& model, const std::vector<int>& tokens);
 // on an empty cache, then one token at a time, produces exactly the
 // logits gpt2_forward would - at a fraction of the work.
 Tensor gpt2_forward(const GPT2Weights& model, const std::vector<int>& tokens, KVCache& cache);
+
+// Convert the model's large matrices (the four per-layer weight matrices
+// and wte, 98% of the parameters) to float16 and free the float32
+// copies. Halves the bytes every decode step must read. Embeddings,
+// LayerNorms, biases and the KV cache stay float32. One-way.
+void to_half(GPT2Weights& model);
 
 } // namespace inferno
