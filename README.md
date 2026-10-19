@@ -68,6 +68,7 @@ End to end on the full 124M model (`make bench-e2e`, torch 2.13 CPU):
 | decode step, 64-token KV cache | 10.4 ms/token | — |
 | generate 32 tokens, full recompute | 7.1 tok/s | 41.0 tok/s |
 | generate 32 tokens, KV cache | 84.7 tok/s | (torch loop above has no cache) |
+| generate 32 tokens, KV cache, fp16 weights | 129.8 tok/s | - |
 
 Read that honestly: the KV cache is a 12x win over our own baseline,
 and our cached loop is now 2x PyTorch's *uncached* loop, but PyTorch's
