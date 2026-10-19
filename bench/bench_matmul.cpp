@@ -5,6 +5,7 @@
 // the correctness reference, so speedups here are honest comparisons of
 // the same computation, not of different work.
 #include "../src/tensor.h"
+#include "../src/half.h"
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -86,6 +87,20 @@ int main() {
             std::printf("%6zu %6zu %10.2f %10.2f\n", t, n, gflops(t_simd), gflops(t_thr));
         }
     }
+    // Decode shapes, fp32 weights vs fp16 weights. GB/s counts weight
+    // bytes only - at M=1 that is essentially all the memory traffic.
+    std::printf("\nDecode (1 x K) @ (K x N): fp32 vs fp16 weights\n");
+    std::printf("%6s %6s %10s %10s %10s %10s\n", "K", "N", "fp32 us", "fp32 GB/s", "fp16 us", "fp16 GB/s");
+    for (auto kn : std::vector<std::pair<size_t, size_t>>{{768, 2304}, {768, 3072}, {3072, 768}, {768, 768}}) {
+        Tensor a = random_tensor(1, kn.first, gen), b = random_tensor(kn.first, kn.second, gen);
+        HalfMatrix bh = to_half(b);
+        double t32 = time_ms([&] { return matmul_threaded(a, b); }, 200) * 1e3;
+        double t16 = time_ms([&] { return matmul_h(a, bh); }, 200) * 1e3;
+        const double mb32 = kn.first * kn.second * 4.0, mb16 = mb32 / 2;
+        std::printf("%6zu %6zu %10.1f %10.1f %10.1f %10.1f\n", kn.first, kn.second,
+                    t32, mb32 / t32 / 1e3, t16, mb16 / t16 / 1e3);
+    }
+
     std::printf("\nhardware threads: %u\n", std::thread::hardware_concurrency());
     return 0;
 }

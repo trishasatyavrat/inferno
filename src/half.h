@@ -40,4 +40,14 @@ HalfMatrix to_half(const Tensor& t);
 // Back to float32 (exact: every half is representable as a float).
 Tensor to_float(const HalfMatrix& h);
 
+// C = A @ B with A float32 (M, K) and B half (K, N). Same partitioning as
+// matmul_threaded: rows of C across the pool when M is large, 16-wide
+// column strips when M is small (decode). B is widened to float32 in
+// registers, 8 halves at a time; accumulation is float32.
+Tensor matmul_h(const Tensor& a, const HalfMatrix& b);
+
+// C = A @ B^T with A float32 (M, K) and B half (N, K). For the tied LM
+// head: logits = x @ wte^T with wte stored as half.
+Tensor matmul_bt_h(const Tensor& a, const HalfMatrix& b);
+
 } // namespace inferno

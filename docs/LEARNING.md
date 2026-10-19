@@ -1126,3 +1126,51 @@ error 4.9e-4. Nothing uses it yet; the kernels are next.
 
 **Do now:** `make test`, then change the distribution's std to 1000 and
 see which assertion fails (hint: 65504).
+
+---
+
+## Day 17 (2026-10-19): float16 matmul kernels
+
+**What we built:** `matmul_h` (A float32 @ B half) and `matmul_bt_h`
+(A float32 @ B^T, B half) in `src/half.cpp`, with the same row/column
+partitioning as the float32 kernels. B is widened to float32 in
+registers eight halves at a time (`vld1q_f16`, `vcvt_f32_f16`,
+`vcvt_high_f32_f16`); all accumulation is float32. Tests compare each
+kernel to the float32 matmul of the *same rounded weights* at decode,
+prefill and ragged shapes, plus the full 1 x 768 @ (50257 x 768)^T head.
+`make bench` gained a decode table.
+
+**Measured (decode, M = 1):**
+
+| shape | fp32 | fp16 | speedup |
+|---|---|---|---|
+| 768 -> 2304 (qkv) | 90.9 us | 59.9 us | 1.52x |
+| 768 -> 3072 (mlp fc) | 130.8 us | 69.7 us | 1.88x |
+| 3072 -> 768 (mlp proj) | 106.9 us | 62.6 us | 1.71x |
+| 768 -> 768 (attn proj) | 38.1 us | 37.4 us | 1.02x |
+
+**The concepts:**
+
+- **The test isolates the kernel from the rounding.** Comparing fp16
+  output to the original fp32 weights would mix two error sources:
+  rounding the weights, and any kernel bug. Comparing to the fp32 matmul
+  of `to_float(to_half(B))` - the same rounded values - leaves only
+  summation-order noise, so a tolerance of 1e-4 can catch real bugs.
+  Accuracy of the *model* under rounding is a separate test, next.
+
+- **Why not a clean 2x.** Half the bytes would be 2x if the matmul were
+  purely bandwidth-bound. The big shapes get 1.5-1.9x: some time is
+  fixed cost (waking the pool, writing C) that bytes do not touch, and
+  the widening instructions add work per element. The 768 x 768
+  projection barely moves: at 2.4 MB of fp32 weights it was never
+  bandwidth-bound in the first place, so halving the bytes changes
+  little. The same shape lost GB/s as a result - fewer bytes in the
+  same time.
+
+- **Same thresholds as fp32.** The fp16 functions copy the Day 12/13
+  partition rules exactly, so the comparison measures bytes, not a
+  different threading strategy.
+
+**Do now:** `make bench`, read the decode table, and compute the
+expected per-token saving: sum (fp32 - fp16) x 12 layers for the three
+big rows.

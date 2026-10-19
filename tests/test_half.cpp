@@ -34,7 +34,39 @@ int main() {
     }
     assert(worst <= 4.9e-4);
 
-    std::printf("half tests passed (exact round trip; worst relative error %.2e over %zu weights)\n",
+    // Kernels: matmul_h(A, half(B)) must equal the fp32 matmul of A with
+    // the SAME rounded weights, to(float(half(B))). That isolates kernel
+    // correctness from rounding: any difference beyond summation-order
+    // noise is a kernel bug. Shapes cover the row split, the column
+    // split (decode, M=1), the small serial path, and ragged tails.
+    std::uniform_real_distribution<float> u(-1.0f, 1.0f);
+    const size_t shapes[][3] = {{1, 768, 2304}, {1, 3072, 768}, {64, 768, 3072},
+                                {3, 5, 7}, {1, 17, 33}, {40, 31, 50}};
+    for (auto& s : shapes) {
+        Tensor a({s[0], s[1]}), b({s[1], s[2]}), bt({s[2], s[1]});
+        for (size_t i = 0; i < a.size(); ++i) a.data()[i] = u(g);
+        for (size_t i = 0; i < b.size(); ++i) b.data()[i] = u(g) * 0.05f;
+        for (size_t i = 0; i < bt.size(); ++i) bt.data()[i] = u(g) * 0.05f;
+        HalfMatrix bh = to_half(b), bth = to_half(bt);
+        Tensor ref = matmul_reordered(a, to_float(bh));
+        Tensor got = matmul_h(a, bh);
+        Tensor ref_bt = matmul_bt(a, to_float(bth));
+        Tensor got_bt = matmul_bt_h(a, bth);
+        for (size_t i = 0; i < ref.size(); ++i) assert(std::fabs(ref.data()[i] - got.data()[i]) < 1e-4f);
+        for (size_t i = 0; i < ref_bt.size(); ++i) assert(std::fabs(ref_bt.data()[i] - got_bt.data()[i]) < 1e-4f);
+    }
+    // And the LM-head shape the model will actually use.
+    {
+        Tensor x({1, 768}), wte({50257, 768});
+        for (size_t i = 0; i < x.size(); ++i) x.data()[i] = u(g);
+        for (size_t i = 0; i < wte.size(); ++i) wte.data()[i] = u(g) * 0.05f;
+        HalfMatrix wh = to_half(wte);
+        Tensor ref = matmul_bt(x, to_float(wh)), got = matmul_bt_h(x, wh);
+        for (size_t i = 0; i < ref.size(); ++i) assert(std::fabs(ref.data()[i] - got.data()[i]) < 1e-4f);
+    }
+
+    std::printf("half tests passed (exact round trip; worst relative error %.2e over %zu weights; "
+                "matmul_h and matmul_bt_h agree with fp32 on the same rounded weights)\n",
                 worst, w.size());
     return 0;
 }
